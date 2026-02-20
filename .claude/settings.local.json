@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(__NEW_LINE_d93e1b58a4a9f3d1__ echo \"=== fabric/ now contains ===\")",
-      "Bash(./gradlew :fabric:build:*)"
-    ]
-  }
-}
