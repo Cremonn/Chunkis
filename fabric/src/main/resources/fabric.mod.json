@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "chunkis",
+  "version": "${version}",
+  "name": "Chunkis",
+  "description": "Chunkis is a mod that adds chunk saving and loading to Minecraft.",
+  "authors": [
+    "Liparakis"
+  ],
+  "license": "MIT",
+  "icon": "assets/logo.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "io.liparakis.chunkis.ChunkisMod"
+    ],
+    "client": [
+      "io.liparakis.chunkis.ClientChunkisMod"
+    ]
+  },
+  "mixins": [
+    "chunkis.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "~1.21.4",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
