@@ -3,9 +3,11 @@ package io.liparakis.chunkis;
 import io.liparakis.chunkis.command.MigrationCommand;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
+import io.liparakis.chunkis.util.McaMigrator;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 
 /**
@@ -42,6 +44,8 @@ public class ChunkisMod implements ModInitializer {
     }
 
     private void registerEvents() {
+        ServerWorldEvents.LOAD
+                .register((server, world) -> McaMigrator.migrateWorld(world));
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> GlobalChunkTracker.clear());
     }
 
@@ -53,6 +57,7 @@ public class ChunkisMod implements ModInitializer {
 
     private void registerCommands() {
         CommandRegistrationCallback.EVENT.register(
-                (dispatcher, registryAccess, environment) -> MigrationCommand.register(dispatcher));
+                (dispatcher, registryAccess, environment)
+                        -> MigrationCommand.register(dispatcher));
     }
 }
