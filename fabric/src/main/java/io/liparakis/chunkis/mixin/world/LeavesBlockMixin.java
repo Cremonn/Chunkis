@@ -1,5 +1,7 @@
 package io.liparakis.chunkis.mixin.world;
 
+import io.liparakis.chunkis.util.LeafTickContext;
+import io.liparakis.chunkis.util.LeafTickContext.ContextHandle;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.server.world.ServerWorld;
@@ -10,9 +12,6 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-
-import io.liparakis.chunkis.util.LeafTickContext;
-import io.liparakis.chunkis.util.LeafTickContext.ContextHandle;
 
 /**
  * Mixin for {@link LeavesBlock} to track when leaf decay or updates are
@@ -47,32 +46,50 @@ public class LeavesBlockMixin {
     @Unique
     private static final ThreadLocal<ContextHandle> chunkis$activeHandle = new ThreadLocal<>();
 
+    // -----------------------------------------------------------------------
+    // Mixin injection points
+    // -----------------------------------------------------------------------
+
     /**
      * Enters the leaf tick context before the scheduled tick runs.
+     *
+     * @param state  the current block state of the leaves
+     * @param world  the server world in which the tick is occurring
+     * @param pos    the position of the leaves block
+     * @param random the random generator for this tick
+     * @param ci     the Mixin {@link CallbackInfo}; unused but required by the
+     *               injection contract
      */
     @Inject(method = "scheduledTick", at = @At("HEAD"))
     private void chunkis$beforeLeafTick(
-            BlockState state,
-            ServerWorld world,
-            BlockPos pos,
-            Random random,
-            CallbackInfo ci) {
+            final BlockState state,
+            final ServerWorld world,
+            final BlockPos pos,
+            final Random random,
+            final CallbackInfo ci) {
         chunkis$activeHandle.set(LeafTickContext.enter());
     }
 
     /**
      * Exits the leaf tick context after the scheduled tick completes.
      * Uses TAIL to ensure cleanup happens even if an exception is thrown.
+     *
+     * @param state  the current block state of the leaves
+     * @param world  the server world in which the tick occurred
+     * @param pos    the position of the leaves block
+     * @param random the random generator for this tick
+     * @param ci     the Mixin {@link CallbackInfo}; unused but required by the
+     *               injection contract
      */
     @Inject(method = "scheduledTick", at = @At("TAIL"))
     private void chunkis$afterLeafTick(
-            BlockState state,
-            ServerWorld world,
-            BlockPos pos,
-            Random random,
-            CallbackInfo ci) {
+            final BlockState state,
+            final ServerWorld world,
+            final BlockPos pos,
+            final Random random,
+            final CallbackInfo ci) {
         try {
-            ContextHandle handle = chunkis$activeHandle.get();
+            final ContextHandle handle = chunkis$activeHandle.get();
             if (handle != null) {
                 handle.close();
             }

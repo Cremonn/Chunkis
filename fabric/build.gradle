@@ -7,7 +7,7 @@ version = project.property('mod_version')
 group = project.property('maven_group')
 
 base {
-    archivesName = "${project.property('archives_base_name')}-1.21.1"
+    archivesName = "${project.property('archives_base_name')}-fabric"
 }
 
 repositories {
@@ -21,8 +21,7 @@ repositories {
 dependencies {
     implementation project(path: ":core", configuration: "namedElements")
     include project(":core")  // Bundle core into JAR
-
-    // Minecraft 1.21.1 dependencies
+    
     minecraft "com.mojang:minecraft:${project.property('minecraft_version')}"
     mappings "net.fabricmc:yarn:${project.property('yarn_mappings')}:v2"
 
