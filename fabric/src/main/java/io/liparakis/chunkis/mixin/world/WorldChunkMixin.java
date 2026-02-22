@@ -1,5 +1,6 @@
 package io.liparakis.chunkis.mixin.world;
 
+import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.storage.CisConstants;
@@ -9,11 +10,13 @@ import io.liparakis.chunkis.util.LeafTickContext;
 import io.liparakis.chunkis.util.VanillaChunkSnapshot;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.LeavesBlock;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.block.entity.BlockEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -50,6 +53,10 @@ public class WorldChunkMixin {
     @Unique
     private volatile boolean chunkis$isRestoring = false;
 
+    // -----------------------------------------------------------------------
+    // Mixin injection points
+    // -----------------------------------------------------------------------
+
     /**
      * Intercepts block state changes to track player modifications.
      * <p>
@@ -58,8 +65,7 @@ public class WorldChunkMixin {
      * to the delta.
      * <p>
      * <b>Performance Note:</b> This is on the hot path (called for every block
-     * change).
-     * Early exits minimize overhead for filtered cases.
+     * change). Early exits minimize overhead for filtered cases.
      *
      * @param pos   the block position being modified
      * @param state the new block state
@@ -68,18 +74,66 @@ public class WorldChunkMixin {
      */
     @Inject(method = "setBlockState", at = @At("HEAD"))
     private void chunkis$onSetBlockState(
-            BlockPos pos,
-            BlockState state,
-            boolean moved,
-            CallbackInfoReturnable<BlockState> cir) {
+            final BlockPos pos,
+            final BlockState state,
+            final boolean moved,
+            final CallbackInfoReturnable<BlockState> cir) {
 
-        WorldChunk self = getWorldChunk();
-
-        if (!shouldTrackBlockChange(self, state)) {
+        if (!shouldTrackBlockChange(getWorldChunk(), state)) {
             return;
         }
 
+        if (!state.hasBlockEntity()) {
+            final int localX = pos.getX() & CisConstants.COORD_MASK;
+            final int localY = pos.getY();
+            final int localZ = pos.getZ() & CisConstants.COORD_MASK;
+            @SuppressWarnings("unchecked")
+            ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+            delta.removeBlockEntityData(localX, localY, localZ);
+        }
+
         updateDeltaForBlockChange(pos, state);
+    }
+
+    /**
+     * Intercepts block entity additions to proactively update the delta.
+     */
+    @SuppressWarnings("unchecked")
+    @Inject(method = "setBlockEntity", at = @At("RETURN"))
+    private void chunkis$onSetBlockEntity(final BlockEntity blockEntity, final CallbackInfo ci) {
+        if (!shouldTrackBlockChange(getWorldChunk(), getWorldChunk().getBlockState(blockEntity.getPos()))) {
+            return;
+        }
+        if (getWorldChunk().getWorld() instanceof ServerWorld serverWorld) {
+            try {
+                io.liparakis.chunkis.util.ChunkBlockEntityCapture.captureBlockEntity(
+                        blockEntity,
+                        serverWorld.getRegistryManager(),
+                        (ChunkDelta<BlockState, NbtCompound>) getDelta());
+                GlobalChunkTracker.markDirty(getWorldChunk());
+            } catch (Exception e) {
+                Chunkis.LOGGER.error("Chunkis: Failed to proactively capture added block entity at {}",
+                        blockEntity.getPos(), e);
+            }
+        }
+    }
+
+    /**
+     * Intercepts block entity removals to proactively update the delta.
+     */
+    @SuppressWarnings("unchecked")
+    @Inject(method = "removeBlockEntity", at = @At("HEAD"))
+    private void chunkis$onRemoveBlockEntity(final BlockPos pos, final CallbackInfo ci) {
+        if (!shouldTrackBlockChange(getWorldChunk(), getWorldChunk().getBlockState(pos))) {
+            return;
+        }
+        final int localX = pos.getX() & CisConstants.COORD_MASK;
+        final int localY = pos.getY();
+        final int localZ = pos.getZ() & CisConstants.COORD_MASK;
+
+        ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+        delta.removeBlockEntityData(localX, localY, localZ);
+        GlobalChunkTracker.markDirty(getWorldChunk());
     }
 
     /**
@@ -87,8 +141,7 @@ public class WorldChunkMixin {
      * modifications.
      * <p>
      * When a chunk is promoted from ProtoChunk to WorldChunk (after generation
-     * completes),
-     * this method:
+     * completes), this method:
      * <ol>
      * <li>Captures a snapshot of the vanilla-generated state</li>
      * <li>Restores block changes from the delta</li>
@@ -105,26 +158,23 @@ public class WorldChunkMixin {
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
     private void chunkis$onConstructFromProto(
-            ServerWorld world,
-            ProtoChunk proto,
-            WorldChunk.EntityLoader entityLoader,
-            CallbackInfo ci) {
+            final ServerWorld world,
+            final ProtoChunk proto,
+            final WorldChunk.EntityLoader entityLoader,
+            final CallbackInfo ci) {
 
-        WorldChunk self = getWorldChunk();
         chunkis$vanillaSnapshot = new VanillaChunkSnapshot(proto);
 
-        if (!(proto instanceof ChunkisDeltaDuck deltaDuck)) {
-            return;
-        }
-
-        ChunkDelta protoDelta = deltaDuck.chunkis$getDelta();
-
+        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(proto);
         if (protoDelta == null || protoDelta.isEmpty()) {
             return;
         }
-
-        restoreChunkFromDelta(world, self, proto, protoDelta);
+        restoreChunkFromDelta(world, getWorldChunk(), proto, protoDelta);
     }
+
+    // -----------------------------------------------------------------------
+    // Tracking guards
+    // -----------------------------------------------------------------------
 
     /**
      * Determines if a block change should be tracked in the delta.
@@ -134,38 +184,48 @@ public class WorldChunkMixin {
      * <li>The chunk is client-side</li>
      * <li>Restoration is in progress</li>
      * <li>The chunk is not fully generated</li>
-     * <li>No vanilla snapshot exists</li>
      * <li>The change is from natural leaf decay</li>
      * <li>The change is from a different thread</li>
      * </ul>
+     * <p>
+     * A null vanilla snapshot no longer prevents tracking. If the snapshot
+     * is missing (unexpected code path), the change is tracked without
+     * vanilla deduplication to prevent silent data loss.
      *
      * @param chunk the chunk being modified
      * @param state the new block state
      * @return {@code true} if the change should be tracked
      */
     @Unique
-    private boolean shouldTrackBlockChange(WorldChunk chunk, BlockState state) {
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
+    private boolean shouldTrackBlockChange(final WorldChunk chunk, final BlockState state) {
         if (chunk.getWorld().isClient()) {
             return false;
         }
-
         if (chunkis$isRestoring) {
             return false;
         }
-
         if (!ChunkStatus.FULL.equals(chunk.getStatus())) {
             return false;
         }
-
-        if (chunkis$vanillaSnapshot == null) {
-            return false;
-        }
-
+        // Leaf decay is filtered before the snapshot-null warning so the warning
+        // does not fire for changes that will be discarded anyway.
         if (isNaturalLeafDecay(state)) {
             return false;
         }
-
-        return isOnServerThread(chunk);
+        if (chunkis$vanillaSnapshot == null) {
+            Chunkis.LOGGER.debug(
+                    "Chunkis: Tracking block change without vanilla snapshot for chunk {} "
+                            + "- deduplication disabled",
+                    chunk.getPos());
+        }
+        if (!isOnServerThread(chunk)) {
+            Chunkis.LOGGER.warn(
+                    "Chunkis: Block change rejected - not on server thread for chunk {} (thread: {})",
+                    chunk.getPos(), Thread.currentThread().getName());
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -175,51 +235,64 @@ public class WorldChunkMixin {
      * @return {@code true} if this is natural leaf decay
      */
     @Unique
-    private boolean isNaturalLeafDecay(BlockState state) {
+    private boolean isNaturalLeafDecay(final BlockState state) {
         return state.getBlock() instanceof LeavesBlock && LeafTickContext.isActive();
     }
 
     /**
-     * Verifies the current thread is the server thread.
-     * <p>
-     * Cross-thread block changes are ignored to prevent race conditions.
+     * Returns {@code true} if the current thread is the server thread for the
+     * world owning this chunk.
      *
-     * @param chunk the chunk being modified
-     * @return {@code true} if on the server thread
+     * @param chunk the chunk whose world's server thread is checked
+     * @return {@code true} if this call is on the server thread
      */
     @Unique
-    private boolean isOnServerThread(WorldChunk chunk) {
+    private boolean isOnServerThread(final WorldChunk chunk) {
         if (!(chunk.getWorld() instanceof ServerWorld serverWorld)) {
             return false;
         }
-
+        // Reference equality is intentional: we are comparing thread identity,
+        // not thread names or logical equality.
         return serverWorld.getServer().getThread() == Thread.currentThread();
     }
+
+    // -----------------------------------------------------------------------
+    // Delta mutation helpers
+    // -----------------------------------------------------------------------
 
     /**
      * Updates the delta to reflect a block change.
      * <p>
-     * If the block matches vanilla state, the delta entry is removed.
-     * Otherwise, the change is recorded.
+     * If a vanilla snapshot exists and the block matches vanilla state,
+     * the delta entry is removed. Otherwise, the change is recorded.
+     * <p>
+     * When the vanilla snapshot is null (unexpected construction path),
+     * the change is tracked unconditionally without deduplication to
+     * prevent silent data loss.
      *
      * @param pos   the block position
      * @param state the new block state
      */
     @Unique
-    private void updateDeltaForBlockChange(BlockPos pos, BlockState state) {
-        int localX = pos.getX() & CisConstants.COORD_MASK;
-        int localY = pos.getY();
-        int localZ = pos.getZ() & CisConstants.COORD_MASK;
+    @SuppressWarnings({ "unchecked", "rawtypes" }) // Raw ChunkDelta: getDelta() returns wildcard;
+    // addBlockChange/removeBlockChange are type-erased
+    private void updateDeltaForBlockChange(final BlockPos pos, final BlockState state) {
+        final int localX = pos.getX() & CisConstants.COORD_MASK;
+        final int localY = pos.getY();
+        final int localZ = pos.getZ() & CisConstants.COORD_MASK;
 
-        BlockState vanillaState = chunkis$vanillaSnapshot.getVanillaState(localX, localY, localZ);
-        ChunkDelta delta = getDelta();
+        final ChunkDelta delta = getDelta();
 
-        if (isRevertedToVanilla(vanillaState, state)) {
-            delta.removeBlockChange(localX, localY, localZ);
-        } else {
-            delta.addBlockChange(localX, localY, localZ, state);
-            GlobalChunkTracker.markDirty(getWorldChunk());
+        if (chunkis$vanillaSnapshot != null) {
+            final BlockState vanillaState = chunkis$vanillaSnapshot.getVanillaState(localX, localY, localZ);
+            if (isRevertedToVanilla(vanillaState, state)) {
+                delta.removeBlockChange(localX, localY, localZ);
+                return;
+            }
         }
+
+        delta.addBlockChange(localX, localY, localZ, state);
+        GlobalChunkTracker.markDirty(getWorldChunk());
     }
 
     /**
@@ -230,8 +303,32 @@ public class WorldChunkMixin {
      * @return {@code true} if the block matches vanilla
      */
     @Unique
-    private boolean isRevertedToVanilla(BlockState vanillaState, BlockState currentState) {
+    private boolean isRevertedToVanilla(final BlockState vanillaState, final BlockState currentState) {
         return vanillaState != null && vanillaState.equals(currentState);
+    }
+
+    // -----------------------------------------------------------------------
+    // Restoration helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Resolves the typed {@link ChunkDelta} from a {@link ProtoChunk}'s
+     * {@link ChunkisDeltaDuck} interface.
+     *
+     * <p>
+     * Returns {@code null} if the proto does not implement
+     * {@link ChunkisDeltaDuck} or if the delta itself is {@code null}.
+     *
+     * @param proto the ProtoChunk to resolve the delta from
+     * @return the typed delta, or {@code null} if unavailable
+     */
+    @Unique
+    @SuppressWarnings("unchecked") // Safe: chunkis$getDelta returns our own typed delta
+    private ChunkDelta<BlockState, NbtCompound> resolveProtoDelta(final ProtoChunk proto) {
+        if (!(proto instanceof ChunkisDeltaDuck deltaDuck)) {
+            return null;
+        }
+        return (ChunkDelta<BlockState, NbtCompound>) deltaDuck.chunkis$getDelta();
     }
 
     /**
@@ -249,18 +346,19 @@ public class WorldChunkMixin {
      * @param protoDelta the delta to restore from
      */
     @Unique
+    @SuppressWarnings("unchecked") // Safe: getDelta returns our own typed delta
     private void restoreChunkFromDelta(
-            ServerWorld world,
-            WorldChunk chunk,
-            ProtoChunk proto,
-            ChunkDelta protoDelta) {
+            final ServerWorld world,
+            final WorldChunk chunk,
+            final ProtoChunk proto,
+            final ChunkDelta<BlockState, NbtCompound> protoDelta) {
 
-        ChunkDelta selfDelta = getDelta();
+        final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
 
         try {
             chunkis$isRestoring = true;
 
-            boolean wasOptimized = ChunkRestorer.restore(
+            final boolean wasOptimized = ChunkRestorer.restore(
                     world,
                     chunk,
                     protoDelta,
@@ -273,8 +371,8 @@ public class WorldChunkMixin {
 
             GlobalChunkTracker.markDirty(chunk);
 
-        } catch (Exception e) {
-            logRestorationError(proto, e);
+        } catch (final Exception e) {
+            Chunkis.LOGGER.error("Chunkis: Failed to restore chunk {}", proto.getPos(), e);
         } finally {
             chunkis$isRestoring = false;
         }
@@ -282,34 +380,34 @@ public class WorldChunkMixin {
         protoDelta.markSaved();
     }
 
-    /**
-     * Logs chunk restoration errors.
-     *
-     * @param proto the ProtoChunk that failed to restore
-     * @param e     the exception that occurred
-     */
-    @Unique
-    private void logRestorationError(ProtoChunk proto, Exception e) {
-        io.liparakis.chunkis.Chunkis.LOGGER.error(
-                "Chunkis: Failed to restore chunk {}",
-                proto.getPos(),
-                e);
-    }
+    // -----------------------------------------------------------------------
+    // Self-cast helpers
+    // -----------------------------------------------------------------------
 
     /**
-     * Retrieves the delta for this chunk.
+     * Retrieves the delta for this chunk by casting {@code this} to
+     * {@link ChunkisDeltaDuck}.
+     *
+     * <p>
+     * This is safe because {@link CommonChunkMixin} is applied to the base
+     * {@link net.minecraft.world.chunk.Chunk} class, guaranteeing all
+     * {@link WorldChunk} instances implement {@link ChunkisDeltaDuck}.
      *
      * @return the chunk delta
      */
     @Unique
-    private ChunkDelta getDelta() {
+    private ChunkDelta<?, ?> getDelta() {
         return ((ChunkisDeltaDuck) this).chunkis$getDelta();
     }
 
     /**
-     * Casts this mixin instance to WorldChunk.
+     * Casts this mixin instance to {@link WorldChunk}.
      *
-     * @return this instance as WorldChunk
+     * <p>
+     * This is the standard Mixin self-cast pattern and is safe because this
+     * mixin targets {@link WorldChunk} exclusively.
+     *
+     * @return this instance as {@link WorldChunk}
      */
     @Unique
     private WorldChunk getWorldChunk() {

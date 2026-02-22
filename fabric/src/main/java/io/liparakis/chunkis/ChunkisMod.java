@@ -2,8 +2,10 @@ package io.liparakis.chunkis;
 
 import io.liparakis.chunkis.command.MigrationCommand;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
+import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 
 /**
@@ -34,16 +36,23 @@ public class ChunkisMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        registerPayloads();
+        registerCommands();
+        registerEvents();
+    }
+
+    private void registerEvents() {
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> GlobalChunkTracker.clear());
+    }
+
+    private void registerPayloads() {
         PayloadTypeRegistry.playS2C().register(
                 ChunkDeltaPayload.ID,
-                ChunkDeltaPayload.CODEC
-        );
+                ChunkDeltaPayload.CODEC);
+    }
 
-        CommandRegistrationCallback.EVENT
-                .register((dispatcher, registryAccess, environment) ->
-                {
-                    MigrationCommand.register(dispatcher);
-                }
-        );
+    private void registerCommands() {
+        CommandRegistrationCallback.EVENT.register(
+                (dispatcher, registryAccess, environment) -> MigrationCommand.register(dispatcher));
     }
 }

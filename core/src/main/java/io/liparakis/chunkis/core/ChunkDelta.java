@@ -1,5 +1,7 @@
 package io.liparakis.chunkis.core;
 
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2IntMap;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -64,9 +66,14 @@ public final class ChunkDelta<S, N> {
     private Long2ObjectMap<N> blockEntities;
 
     /**
-     * List of global entity data
+     * Active entities keyed by their runtime Entity ID for O(1) updates.
      */
-    private List<N> entities;
+    private final Int2ObjectMap<N> activeEntities;
+
+    /**
+     * Entities loaded from disk or network that haven't been spawned yet.
+     */
+    private List<N> pendingEntities;
 
     /**
      * Tracks whether this delta has unsaved changes
@@ -93,7 +100,8 @@ public final class ChunkDelta<S, N> {
         this.blockPalette = new Palette<>();
         this.positionMap = new Long2IntOpenHashMap(INITIAL_CAPACITY);
         this.positionMap.defaultReturnValue(-1);
-        this.entities = new ArrayList<>();
+        this.activeEntities = new Int2ObjectOpenHashMap<>();
+        this.pendingEntities = new ArrayList<>();
         this.isDirty = false;
         this.needsMigration = false;
         this.isEmptyState = isEmptyState;
@@ -115,14 +123,6 @@ public final class ChunkDelta<S, N> {
      */
     public void addBlockChange(int x, int y, int z, S newState) {
         addBlockChange(x, y, z, newState, true);
-    }
-
-    /**
-     * Checks if a block change exists at the specified position.
-     */
-    public boolean hasBlockChange(int x, int y, int z) {
-        final long posKey = BlockInstruction.packPos(x, y, z);
-        return positionMap.containsKey(posKey);
     }
 
     /**
@@ -241,6 +241,18 @@ public final class ChunkDelta<S, N> {
     }
 
     /**
+     * Removes associated block entity data for the given position and marks delta
+     * as dirty.
+     */
+    public void removeBlockEntityData(int x, int y, int z) {
+        final long posKey = BlockInstruction.packPos(x, y, z);
+        if (blockEntities != null && blockEntities.containsKey(posKey)) {
+            blockEntities.remove(posKey);
+            this.isDirty = true;
+        }
+    }
+
+    /**
      * Removes an instruction by swapping it with the last element and shrinking the
      * array.
      * <p>
@@ -312,6 +324,33 @@ public final class ChunkDelta<S, N> {
 
     // ==================== Entities ====================
 
+    public void putEntity(int entityId, N nbt) {
+        if (nbt != null) {
+            activeEntities.put(entityId, nbt);
+            this.isDirty = true;
+        }
+    }
+
+    public void removeEntity(int entityId) {
+        if (activeEntities.remove(entityId) != null) {
+            this.isDirty = true;
+        }
+    }
+
+    public void clearActiveEntities() {
+        if (!activeEntities.isEmpty()) {
+            activeEntities.clear();
+            this.isDirty = true;
+        }
+    }
+
+    public void addPendingEntity(N nbt) {
+        if (nbt != null) {
+            this.pendingEntities.add(nbt);
+            this.isDirty = true;
+        }
+    }
+
     public void setEntities(List<N> newEntities) {
         setEntities(newEntities, true);
     }
@@ -320,20 +359,29 @@ public final class ChunkDelta<S, N> {
         final List<N> safeEntities = newEntities == null ? Collections.emptyList() : newEntities;
 
         if (!markDirty) {
-            this.entities = new ArrayList<>(safeEntities);
+            this.pendingEntities = new ArrayList<>(safeEntities);
             return;
         }
 
-        if (this.entities.equals(safeEntities)) {
+        if (this.pendingEntities.equals(safeEntities)) {
             return;
         }
 
-        this.entities = new ArrayList<>(safeEntities);
+        this.pendingEntities = new ArrayList<>(safeEntities);
         this.isDirty = true;
     }
 
     public List<N> getEntitiesList() {
-        return entities;
+        List<N> allEntities = new ArrayList<>(activeEntities.values());
+        allEntities.addAll(pendingEntities);
+        return allEntities;
+    }
+
+    public void clearPendingEntities() {
+        if (!this.pendingEntities.isEmpty()) {
+            this.pendingEntities.clear();
+            this.isDirty = true;
+        }
     }
 
     // ==================== Queries ====================
@@ -353,7 +401,8 @@ public final class ChunkDelta<S, N> {
     public boolean isEmpty() {
         return instructionCount == 0
                 && (blockEntities == null || blockEntities.isEmpty())
-                && entities.isEmpty();
+                && activeEntities.isEmpty()
+                && pendingEntities.isEmpty();
     }
 
     // ==================== Dirty Flag ====================
@@ -423,8 +472,9 @@ public final class ChunkDelta<S, N> {
         }
 
         // 3. Visit global entities
-        if (!entities.isEmpty()) {
-            for (N nbt : entities) {
+        List<N> allEntities = getEntitiesList();
+        if (!allEntities.isEmpty()) {
+            for (N nbt : allEntities) {
                 visitor.visitEntity(nbt);
             }
         }
