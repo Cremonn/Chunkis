@@ -4,9 +4,12 @@ import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.core.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.entity.EntityType;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkSection;
@@ -287,6 +290,14 @@ public final class ChunkRestorer {
                 return;
             }
 
+            // Guard: verify the NBT id matches the block entity type the current
+            // block actually supports. A mismatch means stale or migrated delta
+            // data — skip silently rather than letting createFromNbt throw
+            // internally and return null.
+            if (!isNbtIdCompatibleWithState(nbt, currentState, worldPos)) {
+                return;
+            }
+
             final BlockEntity be = BlockEntity.createFromNbt(
                     worldPos, currentState, nbt, world.getRegistryManager());
 
@@ -301,6 +312,56 @@ public final class ChunkRestorer {
             if (runtimeDelta != null) {
                 runtimeDelta.addBlockEntityData(localX, localY, localZ, nbt, false);
             }
+        }
+
+        /**
+         * Returns {@code true} if the {@code id} field in {@code nbt} names a
+         * {@link BlockEntityType} that supports {@code state}'s block.
+         *
+         * <p>
+         * This prevents a mismatch between stale CIS delta data (e.g. a
+         * {@code sculk_sensor} entry at a position that is now a
+         * {@code sculk_catalyst}) from reaching
+         * {@link BlockEntity#createFromNbt}, which would throw an
+         * {@link IllegalStateException} internally and silently return
+         * {@code null}.
+         *
+         * @param nbt          the block entity NBT; must contain an {@code id} tag
+         * @param currentState the block state currently at the target position
+         * @param worldPos     position used only for logging on mismatch
+         * @return {@code true} if the NBT id is compatible with the block state
+         */
+        private boolean isNbtIdCompatibleWithState(
+                final NbtCompound nbt,
+                final BlockState currentState,
+                final BlockPos worldPos) {
+
+            final String idStr = nbt.getString("id");
+            if (idStr == null || idStr.isEmpty()) {
+                LOGGER.debug("Block entity NBT at {} has no id tag — skipping", worldPos);
+                return false;
+            }
+
+            final Identifier id = Identifier.tryParse(idStr);
+            if (id == null) {
+                LOGGER.debug("Block entity NBT at {} has unparseable id '{}' — skipping", worldPos, idStr);
+                return false;
+            }
+
+            final BlockEntityType<?> type = Registries.BLOCK_ENTITY_TYPE.get(id);
+            if (type == null) {
+                LOGGER.debug("Unknown block entity type '{}' at {} — skipping", idStr, worldPos);
+                return false;
+            }
+
+            if (!type.supports(currentState)) {
+                LOGGER.debug(
+                        "Skipping stale block entity '{}' at {} — block {} does not support this type",
+                        idStr, worldPos, currentState);
+                return false;
+            }
+
+            return true;
         }
 
         // -------------------------------------------------------------------------
