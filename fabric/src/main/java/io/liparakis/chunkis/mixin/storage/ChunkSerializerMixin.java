@@ -1,6 +1,5 @@
 package io.liparakis.chunkis.mixin.storage;
 
-import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.CisChunkPos;
@@ -13,7 +12,6 @@ import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.SerializedChunk;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.storage.StorageKey;
-import org.slf4j.Logger;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -21,177 +19,174 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Mixin for {@link SerializedChunk} to intercept chunk deserialization.
+ * Intercepts {@link SerializedChunk#convert} to restore Chunkis delta data
+ * into freshly converted {@link ProtoChunk} instances.
  *
  * <p>
- * Integrates Chunkis delta restoration into Minecraft's standard chunk loading
- * pipeline. When chunks are loaded from disk, this mixin attempts to restore
- * associated delta data from either memory (GlobalChunkTracker) or persistent
- * storage, then resets the chunk status to trigger terrain regeneration with
- * the delta applied.
- *
- * <p>
- * <b>Restoration Flow:</b>
- * <ol>
- * <li>Check GlobalChunkTracker for in-memory delta (handles recent saves)</li>
- * <li>Fallback to disk storage if not found in memory</li>
- * <li>Attach delta to ProtoChunk for downstream processing</li>
- * <li>Force chunk status to EMPTY to trigger generation pipeline</li>
- * </ol>
+ * Injected at {@code RETURN} so the vanilla conversion path completes first.
+ * The delta is loaded via a memory-first, disk-fallback strategy and attached
+ * to the proto chunk. The chunk status is then reset to
+ * {@link ChunkStatus#EMPTY} so the worldgen pipeline re-runs and applies the
+ * delta on top of fresh terrain.
  *
  * @author Liparakis
- * @version 2.1
+ * @version 1.2
  */
 @Mixin(SerializedChunk.class)
 public class ChunkSerializerMixin {
 
-    @Unique
-    private static final Logger LOGGER = Chunkis.LOGGER;
+    // -------------------------------------------------------------------------
+    // Injection
+    // -------------------------------------------------------------------------
 
     /**
-     * Injects at the end of chunk deserialization to restore Chunkis delta data.
+     * Intercepts the return of {@code SerializedChunk#convert} to restore
+     * any Chunkis delta attached to the chunk.
      *
-     * <p>
-     * This method implements a two-tier loading strategy: first checking the
-     * in-memory GlobalChunkTracker for recent deltas (avoiding race conditions
-     * during
-     * rapid save/load cycles), then falling back to persistent storage. If a delta
-     * is found, the chunk status is reset to {@link ChunkStatus#EMPTY} to ensure
-     * the world generator applies the delta atop freshly generated terrain.
-     *
-     * @param world       the server world context for the chunk
-     * @param poiStorage  the point of interest storage (unused but required by
-     *                    inject)
-     * @param key         the storage key for the chunk region
-     * @param expectedPos the expected chunk position (unused but required by
-     *                    inject)
-     * @param cir         callback containing the deserialized {@link ProtoChunk}
+     * @param world       the server world context
+     * @param poiStorage  point of interest storage (unused by this mixin)
+     * @param key         storage key for the chunk (unused by this mixin)
+     * @param expectedPos the expected chunk position
+     * @param cir         callback holding the converted {@link ProtoChunk}
      */
     @Inject(method = "convert", at = @At("RETURN"))
     private static void chunkis$onConvert(
-            ServerWorld world,
-            PointOfInterestStorage poiStorage,
-            StorageKey key,
-            ChunkPos expectedPos,
-            CallbackInfoReturnable<ProtoChunk> cir) {
+            final ServerWorld world,
+            final PointOfInterestStorage poiStorage,
+            final StorageKey key,
+            final ChunkPos expectedPos,
+            final CallbackInfoReturnable<ProtoChunk> cir) {
 
-        var chunk = cir.getReturnValue();
-        if (chunk == null) {
+        final ProtoChunk chunk = cir.getReturnValue();
+        if (chunk == null)
             return;
-        }
 
-        var delta = loadDeltaForChunk(chunk.getPos(), world);
+        restoreChunkDelta(world, chunk.getPos(), chunk);
+    }
 
-        if (delta == null || delta.isEmpty()) {
+    // -------------------------------------------------------------------------
+    // Restoration orchestration
+    // -------------------------------------------------------------------------
+
+    /**
+     * Loads the delta for the given position and, if non-empty, attaches it to
+     * the chunk and resets its status for worldgen re-application.
+     *
+     * @param world the server world (for disk storage access)
+     * @param pos   the chunk position
+     * @param chunk the newly converted proto chunk
+     */
+    @Unique
+    private static void restoreChunkDelta(
+            final ServerWorld world,
+            final ChunkPos pos,
+            final ProtoChunk chunk) {
+
+        final ChunkDelta<?, ?> delta = loadDelta(pos, world);
+        if (isDeltaAbsent(delta))
             return;
-        }
 
-        // Trigger migration if needed
         if (delta.needsMigration()) {
-            LOGGER.info("Chunkis [DEBUG]: Migrating chunk delta for {} to CIS8 format", chunk.getPos());
-            GlobalChunkTracker.addDelta(chunk.getPos(), delta);
+            GlobalChunkTracker.addDelta(pos, delta);
         }
 
         attachDeltaToChunk(chunk, delta);
-        resetChunkStatusForRegeneration(chunk);
+        resetChunkStatus(chunk);
     }
 
+    // -------------------------------------------------------------------------
+    // Delta loading — memory-first, disk-fallback
+    // -------------------------------------------------------------------------
+
     /**
-     * Loads a chunk delta using a two-tier strategy: memory-first, then disk.
+     * Loads the delta for the given chunk position using a two-tier strategy:
+     * <ol>
+     * <li>In-memory {@link GlobalChunkTracker} — catches deltas modified since
+     * the last disk flush.</li>
+     * <li>Persistent CIS storage — disk fallback for cold loads.</li>
+     * </ol>
      *
-     * <p>
-     * Checks GlobalChunkTracker first to handle chunks that were recently marked
-     * dirty but may not have been persisted yet. This prevents data loss during
-     * rapid unload/reload cycles. Falls back to disk storage if not found in
-     * memory.
-     *
-     * @param position the chunk position to load delta for
-     * @param world    the server world context
+     * @param pos   the chunk position
+     * @param world the server world (for disk storage access)
      * @return the loaded delta, or null if none exists
      */
     @Unique
     @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaForChunk(ChunkPos position, ServerWorld world) {
-        // Tier 1: Check in-memory tracker (handles race conditions)
-        var delta = loadDeltaFromMemory(position);
-        if (delta != null) {
-            LOGGER.info("Chunkis [DEBUG]: Loaded delta from GlobalChunkTracker for {} (Size: {} blocks)",
-                    position, delta.getBlockInstructions().size());
-            return delta;
-        }
-
-        // Tier 2: Load from persistent storage
-        var diskDelta = loadDeltaFromDisk(position, world);
-        if (diskDelta != null) {
-            LOGGER.info("Chunkis [DEBUG]: Loaded delta from DISK for {} (Size: {} blocks)",
-                    position, diskDelta.getBlockInstructions().size());
-        } else {
-            LOGGER.info("Chunkis [DEBUG]: No delta found on disk for {}", position);
-        }
-        return diskDelta;
+    private static ChunkDelta loadDelta(final ChunkPos pos, final ServerWorld world) {
+        final ChunkDelta fromMemory = loadDeltaFromMemory(pos);
+        if (fromMemory != null)
+            return fromMemory;
+        return loadDeltaFromDisk(pos, world);
     }
 
     /**
-     * Attempts to load a delta from the in-memory GlobalChunkTracker.
+     * Returns a non-empty delta from the in-memory tracker, or null.
      *
-     * @param position the chunk position
-     * @return the delta if found and non-empty, otherwise null
+     * @param pos the chunk position
+     * @return the in-memory delta, or null if absent or empty
      */
     @Unique
     @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromMemory(ChunkPos position) {
-        var delta = GlobalChunkTracker.getDelta(position);
-        if (delta != null && !delta.isEmpty()) {
-            return delta;
-        }
-        return null;
+    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos) {
+        final ChunkDelta delta = GlobalChunkTracker.getDelta(pos);
+        return (delta != null && !delta.isEmpty()) ? delta : null;
     }
 
     /**
-     * Loads a delta from persistent disk storage.
+     * Loads a delta from persistent CIS storage.
      *
-     * @param position the chunk position
-     * @param world    the server world context
-     * @return the delta if found, otherwise null
+     * @param pos   the chunk position
+     * @param world the server world providing the storage instance
+     * @return the loaded delta, or null if no entry exists on disk
      */
     @Unique
     @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromDisk(ChunkPos position, ServerWorld world) {
-        var storage = FabricCisStorageHelper.getStorage(world);
-        var cisPosition = new CisChunkPos(position.x, position.z);
-        return storage.load(cisPosition);
+    private static ChunkDelta loadDeltaFromDisk(final ChunkPos pos, final ServerWorld world) {
+        return FabricCisStorageHelper.getStorage(world).load(new CisChunkPos(pos.x, pos.z));
     }
 
+    // -------------------------------------------------------------------------
+    // Chunk mutation helpers
+    // -------------------------------------------------------------------------
+
     /**
-     * Attaches a delta to a ProtoChunk for downstream processing.
+     * Attaches the given delta to the chunk via {@link ChunkisDeltaDuck}.
+     * No-ops if the chunk does not implement the interface.
      *
-     * <p>
-     * The delta is stored via the ChunkisDeltaDuck interface, making it available
-     * to subsequent mixins (e.g., WorldChunkMixin) that handle terrain generation.
-     *
-     * @param chunk the chunk to attach the delta to
-     * @param delta the delta data to attach
+     * @param chunk the proto chunk to attach to
+     * @param delta the delta to attach
      */
     @Unique
-    @SuppressWarnings("rawtypes")
-    private static void attachDeltaToChunk(ProtoChunk chunk, ChunkDelta delta) {
-        if (chunk instanceof ChunkisDeltaDuck deltaReceiver) {
-            deltaReceiver.chunkis$setDelta(delta);
+    @SuppressWarnings({ "rawtypes" })
+    private static void attachDeltaToChunk(final ProtoChunk chunk, final ChunkDelta delta) {
+        if (chunk instanceof ChunkisDeltaDuck deltaDuck) {
+            deltaDuck.chunkis$setDelta(delta);
         }
     }
 
     /**
-     * Resets chunk status to EMPTY to trigger the generation pipeline.
+     * Resets the chunk's generation status to {@link ChunkStatus#EMPTY} so the
+     * worldgen pipeline re-runs and applies the delta on top of fresh terrain.
      *
-     * <p>
-     * This forces Minecraft to regenerate the chunk's terrain, allowing the
-     * Chunkis system to apply the delta during generation rather than as a
-     * post-processing step. This ensures proper integration with worldgen features.
-     *
-     * @param chunk the chunk to reset
+     * @param chunk the proto chunk to reset
      */
     @Unique
-    private static void resetChunkStatusForRegeneration(ProtoChunk chunk) {
+    private static void resetChunkStatus(final ProtoChunk chunk) {
         chunk.setStatus(ChunkStatus.EMPTY);
+    }
+
+    // -------------------------------------------------------------------------
+    // Guard predicates
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the given delta is null or contains no changes.
+     *
+     * @param delta the delta to test, may be null
+     * @return true if the delta should be skipped
+     */
+    @Unique
+    private static boolean isDeltaAbsent(final ChunkDelta<?, ?> delta) {
+        return delta == null || delta.isEmpty();
     }
 }
