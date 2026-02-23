@@ -30,276 +30,309 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Thread-safe helper class for managing Chunkis storage instances per world
- * dimension.
- * <p>
- * This class maintains a cache of storage instances and ensures proper
- * lifecycle management
- * with concurrent access support. Storage instances are created lazily and can
- * be explicitly
- * closed when no longer needed.
- * </p>
+ * Thread-safe helper for managing {@link CisStorage} instances per world dimension.
  *
  * <p>
- * <b>Thread Safety:</b> All public methods are thread-safe. Storage creation
- * and access
- * are protected by read-write locks to prevent race conditions during close
- * operations.
- * </p>
+ * Storage instances are created lazily and cached by {@link RegistryKey}. Concurrent
+ * access is handled by a combination of {@link ConcurrentHashMap#compute} (for
+ * atomic create-or-replace on the storage map) and a per-wrapper
+ * {@link ReadWriteLock} (for safe close while reads are in flight).
  *
- * when a world is unloaded to prevent memory leaks.
- * </p>
+ * <p>
+ * <b>Lifecycle:</b> Call {@link #getStorage(ServerWorld)} to obtain a storage instance.
+ * Call {@link #closeStorage(ServerWorld)} when a world unloads to release resources and
+ * prevent memory leaks.
+ *
+ * <p>
+ * <b>Thread safety:</b> All public methods are thread-safe.
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 public final class FabricCisStorageHelper {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(FabricCisStorageHelper.class);
 
-    // Directory and file name constants
+    // -------------------------------------------------------------------------
+    // Path constants
+    // -------------------------------------------------------------------------
+
     private static final String DIMENSIONS_DIR = "dimensions";
-    private static final String CHUNKIS_DIR = "chunkis";
-    private static final String REGIONS_DIR = "regions";
-    private static final String MAPPING_FILE = "global_ids.json";
-    private static final String OVERWORLD_ID = "overworld";
+    private static final String CHUNKIS_DIR    = "chunkis";
+    private static final String REGIONS_DIR    = "regions";
+    private static final String MAPPING_FILE   = "global_ids.json";
+    private static final String OVERWORLD_ID   = "overworld";
 
-    // Storage cache with concurrent access support
-    private static final ConcurrentHashMap<RegistryKey<World>, StorageWrapper> storageMap = new ConcurrentHashMap<>();
+    // -------------------------------------------------------------------------
+    // Shared adapter singletons — immutable, reused across all storage instances
+    // -------------------------------------------------------------------------
 
-    // Path cache to avoid repeated directory resolution
-    private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache = new ConcurrentHashMap<>();
+    private static final BlockRegistryAdapter<Block>                       REGISTRY_ADAPTER      = new FabricBlockRegistryAdapter();
+    private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER         = new FabricBlockStateAdapter();
+    private static final NbtAdapter<NbtCompound>                           NBT_ADAPTER           = new FabricNbtAdapter();
+    private static final BlockState                                        DEFAULT_BLOCK_STATE    = Blocks.AIR.getDefaultState();
 
-    // Adapter instances (reused across all storages for efficiency)
-    private static final BlockRegistryAdapter<Block> REGISTRY_ADAPTER = new FabricBlockRegistryAdapter();
-    private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER = new FabricBlockStateAdapter();
-    private static final NbtAdapter<NbtCompound> NBT_ADAPTER = new FabricNbtAdapter();
-    private static final BlockState DEFAULT_BLOCK_STATE = Blocks.AIR.getDefaultState();
-
-    // Prevent instantiation
-    private FabricCisStorageHelper() {
-        throw new AssertionError("Utility class - do not instantiate");
-    }
+    // -------------------------------------------------------------------------
+    // Per-dimension caches
+    // -------------------------------------------------------------------------
 
     /**
-     * Retrieves or creates a CisStorage instance for the given world.
-     * <p>
-     * This method is thread-safe and uses double-checked locking for optimal
-     * performance.
-     * The storage instance is cached and reused for subsequent calls with the same
-     * world.
-     * </p>
+     * Active storage wrappers keyed by dimension registry key.
+     * {@link ConcurrentHashMap#compute} is used for atomic create-or-replace,
+     * eliminating the need for an outer lock on the map itself.
+     */
+    private static final ConcurrentHashMap<RegistryKey<World>, StorageWrapper> storageMap =
+            new ConcurrentHashMap<>();
+
+    /**
+     * Resolved storage directory paths, cached to avoid repeated filesystem
+     * traversal and string concatenation on the hot path.
+     */
+    private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache =
+            new ConcurrentHashMap<>();
+
+    private FabricCisStorageHelper() {
+        throw new AssertionError("Utility class");
+    }
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns the {@link CisStorage} for the given world, creating and caching
+     * a new instance if one does not exist or has been closed.
      *
-     * @param world The server world to get storage for (must not be null)
-     * @return The CisStorage instance for this world
+     * <p>
+     * Fast path (volatile read on the wrapper's {@code open} flag) is lock-free.
+     * The slow path uses {@link ConcurrentHashMap#compute} to atomically create
+     * or replace the wrapper, so only one thread ever constructs storage for a
+     * given dimension at a time.
+     *
+     * @param world the server world (must not be null)
+     * @return the active {@link CisStorage} for the world's dimension
      * @throws NullPointerException           if world is null
      * @throws StorageInitializationException if storage creation fails
      */
-    public static CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(ServerWorld world) {
+    public static CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
         Objects.requireNonNull(world, "ServerWorld cannot be null");
 
-        RegistryKey<World> key = world.getRegistryKey();
+        final RegistryKey<World> key = world.getRegistryKey();
 
-        // Fast path: storage already exists and is open
-        StorageWrapper wrapper = storageMap.get(key);
-        if (wrapper != null && wrapper.isOpen()) {
-            return wrapper.getStorage();
+        // Fast path: wrapper present and open — avoid compute overhead
+        final StorageWrapper existing = storageMap.get(key);
+        if (existing != null && existing.isOpen()) {
+            return existing.getStorage();
         }
 
-        // Slow path: need to create or recreate storage
-        return storageMap.compute(key, (k, existing) -> {
-            // Check if existing storage is still valid
-            if (existing != null && existing.isOpen()) {
-                return existing;
-            }
-
-            // Clean up old storage if it exists
-            if (existing != null) {
-                existing.close();
-            }
-
-            // Create new storage
-            try {
-                CisStorage<Block, BlockState, Property<?>, NbtCompound> storage = createStorageInternal(world);
-                LOGGER.info("Created Chunkis storage for dimension: {}", key.getValue());
-                return new StorageWrapper(storage);
-            } catch (Exception e) {
-                LOGGER.error("Failed to create Chunkis storage for dimension: {}", key.getValue(), e);
-                throw new StorageInitializationException(
-                        "Failed to initialize Chunkis storage for " + key.getValue(), e);
-            }
+        // Slow path: atomic create-or-replace via compute
+        return storageMap.compute(key, (k, current) -> {
+            if (current != null && current.isOpen()) return current;
+            closeQuietly(current);
+            return openStorageWrapper(world, k);
         }).getStorage();
     }
 
     /**
      * Closes and removes the storage instance for the given world.
-     * <p>
-     * This method should be called when a world is unloaded to prevent memory
-     * leaks.
-     * It is safe to call this method multiple times or for worlds without storage.
-     * </p>
      *
-     * @param world The server world to close storage for (must not be null)
+     * <p>
+     * Should be called when a world unloads to release file handles and prevent
+     * memory leaks. Safe to call multiple times or for worlds without storage.
+     *
+     * @param world the server world (must not be null)
      * @throws NullPointerException if world is null
      */
-    public static void closeStorage(ServerWorld world) {
+    public static void closeStorage(final ServerWorld world) {
         Objects.requireNonNull(world, "ServerWorld cannot be null");
 
-        RegistryKey<World> key = world.getRegistryKey();
-        StorageWrapper wrapper = storageMap.remove(key);
-
-        if (wrapper != null) {
-            try {
-                wrapper.close();
-                LOGGER.info("Closed Chunkis storage for dimension: {}", key.getValue());
-            } catch (Exception e) {
-                LOGGER.error("Error closing Chunkis storage for dimension: {}", key.getValue(), e);
-            }
-        }
-
-        // Also clean up path cache
+        final RegistryKey<World> key = world.getRegistryKey();
+        final StorageWrapper wrapper = storageMap.remove(key);
         pathCache.remove(key);
+
+        if (wrapper == null) return;
+
+        try {
+            wrapper.close();
+            LOGGER.info("Closed Chunkis storage for dimension: {}", key.getValue());
+        } catch (final Exception e) {
+            LOGGER.error("Error closing Chunkis storage for dimension: {}", key.getValue(), e);
+        }
     }
 
-    /*
-     * Creates a new CisStorage instance for the given world.
-     * <p>
-     * <b>Optimization:</b> Reuses adapter instances across all storages to reduce
-     * object creation and memory usage.
-     * </p>
-     *
-     * @param world The server world
-     * @return A new CisStorage instance
-     * @throws IOException if storage initialization fails
-     */
+    // -------------------------------------------------------------------------
+    // Storage creation
+    // -------------------------------------------------------------------------
+
     /**
-     * Creates a new CisStorage instance for the given world.
-     * <p>
-     * <b>Optimization:</b> Reuses adapter instances across all storages to reduce
-     * object creation and memory usage.
-     * </p>
+     * Creates a new {@link StorageWrapper} for the given world, logging success.
+     * Wraps any {@link Exception} in a {@link StorageInitializationException}.
      *
-     * @param world The server world
-     * @return A new CisStorage instance
-     * @throws IOException if storage initialization fails
+     * @param world the server world
+     * @param key   the dimension registry key (for logging)
+     * @return a new open {@link StorageWrapper}
+     * @throws StorageInitializationException if the underlying storage cannot be created
      */
-    private static CisStorage<Block, BlockState, Property<?>, NbtCompound> createStorageInternal(
-            ServerWorld world) throws IOException {
+    private static StorageWrapper openStorageWrapper(
+            final ServerWorld world,
+            final RegistryKey<World> key) {
+        try {
+            final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage = buildStorage(world);
+            LOGGER.info("Created Chunkis storage for dimension: {}", key.getValue());
+            return new StorageWrapper(storage);
+        } catch (final Exception e) {
+            LOGGER.error("Failed to create Chunkis storage for dimension: {}", key.getValue(), e);
+            throw new StorageInitializationException(
+                    "Failed to initialize Chunkis storage for " + key.getValue(), e);
+        }
+    }
 
-        Path storageDir = getOrCreateDimensionStorage(world);
-        Path mappingFile = storageDir.getParent().resolve(MAPPING_FILE);
+    /**
+     * Constructs a fully initialized {@link CisStorage} for the given world.
+     *
+     * <p>
+     * A new {@link PropertyPacker} is created per storage instance because it
+     * holds dimension-specific state. All adapter singletons are shared.
+     *
+     * @param world the server world
+     * @return a ready-to-use {@link CisStorage}
+     * @throws IOException if directory creation or mapping file initialization fails
+     */
+    private static CisStorage<Block, BlockState, Property<?>, NbtCompound> buildStorage(
+            final ServerWorld world) throws IOException {
 
-        // Create property packer for efficient state storage
-        PropertyPacker<Block, BlockState, Property<?>> packer = new PropertyPacker<>(STATE_ADAPTER);
+        final Path storageDir  = resolveAndCreateStorageDir(world);
+        final Path mappingFile = storageDir.getParent().resolve(MAPPING_FILE);
 
-        // Load or create mapping file for block ID persistence
-        CisMapping<Block, BlockState, Property<?>> mapping = new CisMapping<>(mappingFile, REGISTRY_ADAPTER,
-                STATE_ADAPTER, packer);
+        // PropertyPacker is per-storage (holds dimension-specific packed property state)
+        final PropertyPacker<Block, BlockState, Property<?>> packer = new PropertyPacker<>(STATE_ADAPTER);
+
+        final CisMapping<Block, BlockState, Property<?>> mapping =
+                new CisMapping<>(mappingFile, REGISTRY_ADAPTER, STATE_ADAPTER, packer);
 
         return new CisStorage<>(storageDir, mapping, STATE_ADAPTER, NBT_ADAPTER, DEFAULT_BLOCK_STATE);
     }
 
+    // -------------------------------------------------------------------------
+    // Path resolution
+    // -------------------------------------------------------------------------
+
     /**
-     * Gets or creates the storage directory for a world dimension.
-     * <p>
-     * <b>Optimization:</b> Caches resolved paths to avoid repeated file system
-     * operations
-     * and string concatenation overhead.
-     * </p>
+     * Returns the storage directory for the given world, creating it on disk if
+     * it does not exist. The resolved path is cached to avoid repeated filesystem
+     * operations on subsequent calls.
      *
-     * @param world The server world
-     * @return The path to the storage directory
+     * @param world the server world
+     * @return the resolved and created storage directory path
      * @throws IOException if directory creation fails
      */
-    private static Path getOrCreateDimensionStorage(ServerWorld world) throws IOException {
-        RegistryKey<World> key = world.getRegistryKey();
+    private static Path resolveAndCreateStorageDir(final ServerWorld world) throws IOException {
+        final RegistryKey<World> key = world.getRegistryKey();
 
-        // Check cache first
-        Path cachedPath = pathCache.get(key);
-        if (cachedPath != null) {
-            return cachedPath;
-        }
+        final Path cached = pathCache.get(key);
+        if (cached != null) return cached;
 
-        // Compute path
-        Path storageDir = computeStorageDirectory(world);
-
-        // Create directory if it doesn't exist
+        final Path storageDir = computeStorageDirectory(world);
         Files.createDirectories(storageDir);
-
-        // Cache the path for future use
         pathCache.put(key, storageDir);
-
         return storageDir;
     }
 
-    /*
-     * Computes the storage directory path for a world.
-     * <p>
-     * <b>Optimization:</b> Uses efficient path construction and avoids unnecessary
-     * string allocations.
-     * </p>
-     *
-     * @param world The server world
-     * @return The computed storage directory path
-     */
     /**
-     * Computes the storage directory path for a world.
-     * <p>
-     * <b>Optimization:</b> Uses efficient path construction and avoids unnecessary
-     * string allocations.
-     * </p>
+     * Computes the expected storage directory path for the given world without
+     * touching the filesystem.
      *
-     * @param world The server world
-     * @return The computed storage directory path
+     * <p>
+     * Overworld resolves to {@code <save>/chunkis/regions}.
+     * Other dimensions resolve to {@code <save>/dimensions/<namespace>/<path>/chunkis/regions}.
+     *
+     * @param world the server world
+     * @return the computed (not yet created) directory path
      */
-    private static Path computeStorageDirectory(ServerWorld world) {
+    private static Path computeStorageDirectory(final ServerWorld world) {
+        final String dimPath = world.getRegistryKey().getValue().getPath();
         Path baseDir = world.getServer().getSavePath(WorldSavePath.ROOT);
-        String dimId = world.getRegistryKey().getValue().getPath();
 
-        // Handle non-overworld dimensions by appending namespace/id
-        if (!OVERWORLD_ID.equals(dimId)) {
-            String namespace = world.getRegistryKey().getValue().getNamespace();
-            baseDir = baseDir.resolve(DIMENSIONS_DIR)
-                    .resolve(namespace)
-                    .resolve(dimId);
+        if (!isOverworld(dimPath)) {
+            final String namespace = world.getRegistryKey().getValue().getNamespace();
+            baseDir = baseDir.resolve(DIMENSIONS_DIR).resolve(namespace).resolve(dimPath);
         }
 
-        // Append chunkis/regions subdirectories for final path
         return baseDir.resolve(CHUNKIS_DIR).resolve(REGIONS_DIR);
     }
 
     /**
-     * Wrapper class for CisStorage with lifecycle tracking.
-     * <p>
-     * Provides thread-safe close operation and state tracking to prevent
-     * use-after-close errors.
-     * </p>
+     * Returns true if the given dimension path corresponds to the overworld.
+     *
+     * @param dimPath the dimension registry path (e.g., "overworld", "the_nether")
+     * @return true if dimPath equals {@value #OVERWORLD_ID}
      */
-    private static class StorageWrapper {
+    private static boolean isOverworld(final String dimPath) {
+        return OVERWORLD_ID.equals(dimPath);
+    }
+
+    // -------------------------------------------------------------------------
+    // Lifecycle helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Closes the given wrapper, suppressing any exception.
+     * Used during atomic replace in {@link #getStorage} to clean up a stale wrapper
+     * without aborting the compute lambda.
+     *
+     * @param wrapper the wrapper to close, may be null
+     */
+    private static void closeQuietly(final StorageWrapper wrapper) {
+        if (wrapper == null) return;
+        try {
+            wrapper.close();
+        } catch (final Exception e) {
+            LOGGER.warn("Error closing stale Chunkis storage wrapper", e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // StorageWrapper
+    // -------------------------------------------------------------------------
+
+    /**
+     * Wraps a {@link CisStorage} with lifecycle state tracking.
+     *
+     * <p>
+     * A {@link ReadWriteLock} allows concurrent {@link #getStorage()} reads while
+     * serializing against {@link #close()}, preventing use-after-close on the
+     * underlying storage.
+     *
+     * <p>
+     * {@code isOpen()} reads the volatile {@code open} flag without acquiring a
+     * lock, providing a fast pre-check before entering the read-locked path.
+     */
+    private static final class StorageWrapper {
+
         private final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage;
         private final ReadWriteLock lock = new ReentrantReadWriteLock();
+
+        /**
+         * Volatile so that {@link #isOpen()} checks outside the lock see the
+         * updated value immediately after {@link #close()} completes.
+         */
         private volatile boolean open = true;
 
-        StorageWrapper(CisStorage<Block, BlockState, Property<?>, NbtCompound> storage) {
+        StorageWrapper(final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage) {
             this.storage = Objects.requireNonNull(storage, "Storage cannot be null");
         }
 
         /**
-         * Gets the underlying storage instance.
-         * <p>
-         * Uses read lock to allow concurrent access while preventing access during
-         * close.
-         * </p>
+         * Returns the underlying storage under a read lock, preventing concurrent
+         * access while a {@link #close()} is in progress.
          *
-         * @return The storage instance
-         * @throws IllegalStateException if storage is closed
+         * @return the active storage instance
+         * @throws IllegalStateException if the storage has been closed
          */
         CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
             lock.readLock().lock();
             try {
-                if (!open) {
-                    throw new IllegalStateException("Storage has been closed");
-                }
+                if (!open) throw new IllegalStateException("Storage has been closed");
                 return storage;
             } finally {
                 lock.readLock().unlock();
@@ -307,42 +340,46 @@ public final class FabricCisStorageHelper {
         }
 
         /**
-         * Checks if the storage is still open.
+         * Returns true if the storage is still open.
+         * Read is lock-free (volatile) and intended as a fast pre-check only.
          *
-         * @return true if open, false if closed
+         * @return true if open
          */
         boolean isOpen() {
             return open;
         }
 
         /**
-         * Closes the storage instance.
-         * <p>
-         * Uses write lock to ensure no concurrent access during close operation.
-         * Idempotent - safe to call multiple times.
-         * </p>
+         * Closes the underlying storage under a write lock.
+         * Idempotent — subsequent calls after the first are ignored.
          */
         void close() {
             lock.writeLock().lock();
             try {
-                if (open) {
-                    storage.close();
-                    open = false;
-                }
+                if (!open) return;
+                storage.close();
+                open = false;
             } finally {
                 lock.writeLock().unlock();
             }
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Exception type
+    // -------------------------------------------------------------------------
+
     /**
-     * Custom exception for storage initialization failures.
-     * <p>
-     * Provides better error context than generic RuntimeException.
-     * </p>
+     * Thrown when a {@link CisStorage} instance cannot be created for a dimension.
+     * Wraps the underlying cause for full stack trace propagation.
      */
-    public static class StorageInitializationException extends RuntimeException {
-        public StorageInitializationException(String message, Throwable cause) {
+    public static final class StorageInitializationException extends RuntimeException {
+
+        /**
+         * @param message a description identifying the dimension that failed
+         * @param cause   the underlying exception
+         */
+        public StorageInitializationException(final String message, final Throwable cause) {
             super(message, cause);
         }
     }

@@ -17,8 +17,16 @@ import java.util.Optional;
 /**
  * Internal implementation of the {@link ChunkisApi} interface.
  *
+ * <p>
+ * Implemented as a singleton. Construction is private; callers obtain the
+ * instance via {@link #getInstance()}.
+ *
+ * <p>
+ * Chunk references passed into this class are never retained beyond the
+ * scope of each method call.
+ *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 public final class ChunkisApiImpl implements ChunkisApi {
 
@@ -27,34 +35,101 @@ public final class ChunkisApiImpl implements ChunkisApi {
     private ChunkisApiImpl() {
     }
 
+    /**
+     * Returns the singleton instance of {@link ChunkisApiImpl}.
+     *
+     * @return the shared instance
+     */
     public static ChunkisApiImpl getInstance() {
         return INSTANCE;
     }
 
+    // -------------------------------------------------------------------------
+    // ChunkisApi API
+    // -------------------------------------------------------------------------
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(ServerWorld world) {
+    public CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
         return FabricCisStorageHelper.getStorage(world);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>
+     * The cast to {@code ChunkDelta<BlockState, NbtCompound>} is safe because
+     * all deltas attached to chunks in the Fabric environment are constructed
+     * with exactly these type parameters.
+     */
     @Override
     @SuppressWarnings("unchecked")
-    public Optional<ChunkDelta<BlockState, NbtCompound>> getDelta(Chunk chunk) {
-        if (chunk instanceof ChunkisDeltaDuck duck) {
-            ChunkDelta<?, ?> rawDelta = duck.chunkis$getDelta();
-            if (rawDelta != null) {
-                // Safe cast as we know the types used in fabric environment
-                return Optional.of((ChunkDelta<BlockState, NbtCompound>) rawDelta);
-            }
-        }
-        return Optional.empty();
+    public Optional<ChunkDelta<BlockState, NbtCompound>> getDelta(final Chunk chunk) {
+        if (!isChunkisDuck(chunk))
+            return Optional.empty();
+
+        final ChunkDelta<BlockState, NbtCompound> rawDelta = (ChunkDelta<BlockState, NbtCompound>) asDuck(chunk)
+                .chunkis$getDelta();
+        if (rawDelta == null)
+            return Optional.empty();
+
+        return Optional.of(rawDelta);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public boolean hasChunkisData(Chunk chunk) {
-        if (chunk instanceof ChunkisDeltaDuck duck) {
-            ChunkDelta<?, ?> delta = duck.chunkis$getDelta();
-            return delta != null && !delta.isEmpty();
-        }
-        return false;
+    public boolean hasChunkisData(final Chunk chunk) {
+        if (!isChunkisDuck(chunk))
+            return false;
+
+        final ChunkDelta<?, ?> delta = asDuck(chunk).chunkis$getDelta();
+        return isNonEmptyDelta(delta);
+    }
+
+    // -------------------------------------------------------------------------
+    // Guard predicates
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the given chunk implements the {@link ChunkisDeltaDuck}
+     * interface,
+     * meaning it was mixed in and can carry a {@link ChunkDelta}.
+     *
+     * @param chunk the chunk to test
+     * @return true if the chunk is a ChunkisDeltaDuck
+     */
+    private static boolean isChunkisDuck(final Chunk chunk) {
+        return chunk instanceof ChunkisDeltaDuck;
+    }
+
+    /**
+     * Returns true if the given delta is non-null and contains at least one change.
+     *
+     * @param delta the delta to test, may be null
+     * @return true if the delta is present and non-empty
+     */
+    private static boolean isNonEmptyDelta(final ChunkDelta<?, ?> delta) {
+        return delta != null && !delta.isEmpty();
+    }
+
+    // -------------------------------------------------------------------------
+    // Cast helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Casts the given chunk to {@link ChunkisDeltaDuck}.
+     *
+     * <p>
+     * Only call after confirming {@link #isChunkisDuck(Chunk)} returns true.
+     *
+     * @param chunk the chunk to cast
+     * @return the chunk as a ChunkisDeltaDuck
+     */
+    private static ChunkisDeltaDuck asDuck(final Chunk chunk) {
+        return (ChunkisDeltaDuck) chunk;
     }
 }
