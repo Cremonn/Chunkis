@@ -97,6 +97,7 @@ public abstract class AbstractCisEncoder<S, N> {
     /**
      * Collects all unique block states used in the chunk.
      */
+    @SuppressWarnings("unchecked")
     private List<S> collectUsedStates(CisChunk<S> chunk) {
         Object2IntMap<S> uniqueStates = new Object2IntOpenHashMap<>();
         uniqueStates.put(airState, 0); // Always include air
@@ -172,7 +173,7 @@ public abstract class AbstractCisEncoder<S, N> {
      */
     private void writeEntities(DataOutputStream dos, ChunkDelta<S, N> delta) throws IOException {
         List<N> entities = delta.getEntitiesList();
-        int entityCount = (entities != null) ? entities.size() : 0;
+        int entityCount = entities.size();
         dos.writeInt(entityCount);
 
         if (entityCount > 0) {
@@ -204,6 +205,7 @@ public abstract class AbstractCisEncoder<S, N> {
     /**
      * Encodes a sparse section.
      */
+    @SuppressWarnings("unchecked")
     private void encodeSparseSection(EncoderContext<S> ctx, CisSection<S> section) {
         ctx.bitWriter.write(CisConstants.SECTION_ENCODING_SPARSE, 1);
         ctx.bitWriter.write(section.sparseSize, CisConstants.BLOCK_COUNT_BITS);
@@ -233,7 +235,7 @@ public abstract class AbstractCisEncoder<S, N> {
 
         buildLocalPalette(ctx, section.denseBlocks);
 
-        int localAirIndex = ensureAirInPalette(ctx);
+        ensureAirInPalette(ctx);
         int localSize = ctx.localPalette.size();
 
         ctx.bitWriter.write(localSize, CisConstants.PALETTE_SIZE_BITS);
@@ -243,16 +245,18 @@ public abstract class AbstractCisEncoder<S, N> {
             ctx.bitWriter.write(globalIdx, globalBits);
         }
 
-        int bitsPerBlock = calculateBitsNeeded(localSize);
+        // Add +1 to localSize because index 0 is reserved for 'null' (no change)
+        int bitsPerBlock = calculateBitsNeeded(localSize + 1);
         if (bitsPerBlock > 0) {
-            writeBlockData(ctx, section.denseBlocks, localAirIndex, bitsPerBlock);
+            writeBlockData(ctx, section.denseBlocks, bitsPerBlock);
         }
     }
 
+    @SuppressWarnings("unchecked")
     protected void buildLocalPalette(EncoderContext<S> ctx, Object[] states) {
         for (int i = 0; i < SECTION_VOLUME; i++) {
             S state = (S) states[i];
-            if (state != null && !stateAdapter.isAir(state) && !ctx.fastLocalPaletteIndex.containsKey(state)) {
+            if (state != null && !ctx.fastLocalPaletteIndex.containsKey(state)) {
                 int globalIdx = ctx.globalIdMap.getInt(state);
                 if (globalIdx != -1) {
                     ctx.fastLocalPaletteIndex.put(state, ctx.localPalette.size());
@@ -262,9 +266,10 @@ public abstract class AbstractCisEncoder<S, N> {
         }
     }
 
-    protected int ensureAirInPalette(EncoderContext<S> ctx) {
+    protected void ensureAirInPalette(EncoderContext<S> ctx) {
         if (ctx.fastLocalPaletteIndex.containsKey(airState)) {
-            return ctx.fastLocalPaletteIndex.getInt(airState);
+            ctx.fastLocalPaletteIndex.getInt(airState);
+            return;
         }
 
         int airGlobalIdx = ctx.globalIdMap.getInt(airState);
@@ -275,18 +280,22 @@ public abstract class AbstractCisEncoder<S, N> {
         int localAirIndex = ctx.localPalette.size();
         ctx.localPalette.add(airGlobalIdx);
         ctx.fastLocalPaletteIndex.put(airState, localAirIndex);
-        return localAirIndex;
     }
 
     /**
      * write the block data for a dense section.
      */
-    private void writeBlockData(EncoderContext<S> ctx, Object[] states, int localAirIndex, int bitsPerBlock) {
+    @SuppressWarnings("unchecked")
+    private void writeBlockData(EncoderContext<S> ctx, Object[] states, int bitsPerBlock) {
         for (int i = 0; i < SECTION_VOLUME; i++) {
             S state = (S) states[i];
-            int localIdx = (state == null || stateAdapter.isAir(state))
-                    ? localAirIndex
-                    : ctx.fastLocalPaletteIndex.getInt(state);
+
+            // local index 0 means "no change" (null)
+            // local index 1..N means the block was explicitly modified to the state in the
+            // palette
+            int localIdx = (state == null)
+                    ? 0
+                    : ctx.fastLocalPaletteIndex.getInt(state) + 1;
 
             ctx.bitWriter.write(localIdx, bitsPerBlock);
         }
