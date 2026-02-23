@@ -4,86 +4,55 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Thread-local context tracker for leaf tick operations with automatic resource
- * management.
+ * Thread-local context tracker for leaf tick operations with automatic resource management.
+ *
  * <p>
- * This utility class provides a thread-safe, memory-safe mechanism to track
- * whether the
- * current thread is executing within a "leaf tick" context. A leaf tick
- * typically refers to
- * a specific phase of chunk or block updates where certain operations should be
- * handled differently.
- * </p>
+ * Provides a thread-safe, memory-safe mechanism to track whether the current thread is
+ * executing within a "leaf tick" context — a specific phase of chunk or block updates
+ * where certain operations should be handled differently.
  *
  * <h2>Features</h2>
  * <ul>
- * <li><b>Zero Boxing Overhead:</b> Uses primitive boolean storage to avoid
- * object allocation</li>
- * <li><b>Memory Leak Prevention:</b> Automatic cleanup with try-with-resources
- * pattern</li>
- * <li><b>Nested Context Support:</b> Properly handles nested leaf tick
- * operations</li>
- * <li><b>Thread-Safe:</b> Per-thread storage with no synchronization
- * overhead</li>
- * <li><b>Debug Support:</b> Optional logging for context lifecycle
- * tracking</li>
+ * <li><b>Zero Boxing Overhead:</b> Uses primitive {@code int} depth storage</li>
+ * <li><b>Memory Leak Prevention:</b> Automatic cleanup via try-with-resources</li>
+ * <li><b>Nested Context Support:</b> Depth counter handles re-entrant enter/exit correctly</li>
+ * <li><b>Thread-Safe:</b> Per-thread storage with no synchronization overhead</li>
+ * <li><b>Debug Support:</b> Optional lifecycle logging via {@code -Dchunkis.leafTickContext.debug=true}</li>
  * </ul>
  *
- * <h2>Usage Patterns</h2>
+ * <h2>Usage</h2>
  *
- * <h3>Recommended: Try-With-Resources (Automatic Cleanup)</h3>
- * 
+ * <h3>Recommended: try-with-resources (automatic cleanup)</h3>
  * <pre>{@code
  * try (var ctx = LeafTickContext.enter()) {
- *     // Operations in leaf tick context
  *     performLeafTickOperations();
- * } // Context automatically cleaned up
+ * } // Context automatically exited
  * }</pre>
  *
- * <h3>Nested Contexts</h3>
- * 
+ * <h3>Nested contexts</h3>
  * <pre>{@code
- * try (var ctx1 = LeafTickContext.enter()) {
- *     // Depth = 1
- *     try (var ctx2 = LeafTickContext.enter()) {
- *         // Depth = 2, still active
+ * try (var outer = LeafTickContext.enter()) {  // depth = 1
+ *     try (var inner = LeafTickContext.enter()) {  // depth = 2
  *         performNestedOperation();
- *     } // Depth = 1, still active
- * } // Depth = 0, inactive
- * }</pre>
- *
- * <h3>Legacy: Manual Management (Not Recommended)</h3>
- * 
- * <pre>{@code
- * LeafTickContext.set(true);
- * try {
- *     performLeafTickOperations();
- * } finally {
- *     LeafTickContext.set(false);
- * }
+ *     } // depth = 1, still active
+ * } // depth = 0, inactive
  * }</pre>
  *
  * <h2>Performance Characteristics</h2>
  * <ul>
- * <li><b>get():</b> ~5 ns (ThreadLocal read + primitive compare)</li>
- * <li><b>enter():</b> ~20 ns (ThreadLocal read/write + object creation)</li>
- * <li><b>Memory:</b> ~40 bytes per thread (context holder)</li>
+ * <li><b>isActive():</b> ~5 ns (ThreadLocal read + primitive compare)</li>
+ * <li><b>enter():</b> ~20 ns (ThreadLocal read/write + ContextHandle allocation)</li>
+ * <li><b>Memory:</b> ~40 bytes per thread (ContextHolder)</li>
  * </ul>
  *
  * <h2>Memory Safety</h2>
  * <p>
- * In server environments using thread pools (like Minecraft), ThreadLocal can
- * cause memory leaks
- * if not properly cleaned up. This implementation provides:
- * </p>
- * <ul>
- * <li>Automatic cleanup via AutoCloseable pattern</li>
- * <li>Depth tracking to handle nested contexts correctly</li>
- * <li>Warning logs when contexts are not properly closed</li>
- * </ul>
+ * In server environments using thread pools (like Minecraft), {@link ThreadLocal} can
+ * cause memory leaks without proper cleanup. This implementation prevents leaks via the
+ * {@link AutoCloseable} pattern and warns on negative depth (mismatched enter/exit).
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  * @see ThreadLocal
  */
 public final class LeafTickContext {
@@ -91,205 +60,185 @@ public final class LeafTickContext {
     private static final Logger LOGGER = LoggerFactory.getLogger(LeafTickContext.class);
 
     /**
-     * Enable debug logging for context lifecycle tracking.
-     * Useful for diagnosing context leaks or incorrect nesting.
+     * Enables debug logging for context lifecycle events (enter/exit/set).
+     * Activate via {@code -Dchunkis.leafTickContext.debug=true}.
      */
     private static final boolean DEBUG_MODE = Boolean.getBoolean("chunkis.leafTickContext.debug");
 
     /**
-     * Thread-local storage for leaf tick context state.
-     * Uses ContextHolder to avoid Boolean boxing and support nesting.
+     * Per-thread context holder. Uses {@link ContextHolder} to store depth as a
+     * primitive {@code int}, avoiding {@link Boolean} boxing and supporting nesting.
      */
-    private static final ThreadLocal<ContextHolder> context = ThreadLocal.withInitial(ContextHolder::new);
+    private static final ThreadLocal<ContextHolder> CONTEXT = ThreadLocal.withInitial(ContextHolder::new);
 
-    // Prevent instantiation
     private LeafTickContext() {
-        throw new AssertionError("Utility class - do not instantiate");
+        throw new AssertionError("Utility class");
     }
 
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
+
     /**
-     * Enters a leaf tick context and returns an AutoCloseable handle.
-     * <p>
-     * This is the <b>recommended</b> way to use LeafTickContext. The returned
-     * handle
-     * will automatically restore the previous context state when closed, making it
-     * safe to use with try-with-resources.
-     * </p>
+     * Enters a leaf tick context for the current thread and returns an
+     * {@link AutoCloseable} handle.
      *
      * <p>
-     * <b>Performance:</b> ~20 ns per call (ThreadLocal access + object allocation)
-     * </p>
+     * The returned handle decrements the depth counter when closed, making it
+     * safe to use with try-with-resources. Nested calls increment the depth
+     * further; the context remains active until all nested enters have exited.
      *
      * <p>
-     * <b>Nesting:</b> Properly handles nested contexts via depth counter. The
-     * context
-     * remains active until all nested enters have been exited.
-     * </p>
+     * <b>Performance:</b> ~20 ns per call (ThreadLocal access + object allocation).
      *
-     * @return An AutoCloseable context handle that restores state when closed
-     * &#064;example
-     * 
-     *          <pre>{@code
-     * try (var ctx = LeafTickContext.enter()) {
-     *     // Code here runs with isActive() == true
-     *     doLeafTickWork();
-     * }
-     * // isActive() automatically restored to previous state
-     * }</pre>
+     * @return an {@link AutoCloseable} handle that exits the context when closed
      */
     public static ContextHandle enter() {
-        ContextHolder holder = context.get();
+        final ContextHolder holder = CONTEXT.get();
         holder.depth++;
-
-        if (DEBUG_MODE) {
-            LOGGER.debug("Entered leaf tick context (depth: {}, thread: {})",
-                    holder.depth, Thread.currentThread().getName());
-        }
-
+        logDebug("Entered leaf tick context (depth: {}, thread: {})", holder.depth);
         return new ContextHandle(holder);
     }
 
     /**
-     * Checks whether the current thread is in a leaf tick context.
-     * <p>
-     * This method is extremely fast (~5 ns) and can be called frequently without
-     * performance concerns.
-     * </p>
+     * Returns true if the current thread is inside an active leaf tick context.
      *
      * <p>
-     * <b>Optimization:</b> Uses primitive boolean comparison to avoid boxing
-     * overhead.
-     * </p>
+     * <b>Performance:</b> ~5 ns — safe to call frequently.
      *
-     * @return {@code true} if the current thread is in an active leaf tick context
-     *         (depth > 0), {@code false} otherwise
+     * @return true if context depth is greater than zero
      */
     public static boolean isActive() {
-        return context.get().depth > 0;
+        return CONTEXT.get().depth > 0;
     }
 
     /**
-     * Sets whether the current thread is in a leaf tick context.
-     * <p>
-     * <b>Legacy Method:</b> This method is provided for backward compatibility but
-     * is
-     * <b>not recommended</b>. Use {@link #enter()} with try-with-resources instead.
-     * </p>
+     * Directly sets the context state for the current thread.
      *
      * <p>
-     * <b>Warning:</b> Manual management with this method is error-prone and can
-     * lead
-     * to context leaks if cleanup is forgotten. Always use try-finally if you must
-     * use
-     * this method.
-     * </p>
+     * <b>Deprecated — prefer {@link #enter()} with try-with-resources.</b>
+     * This method does not support proper nesting: calling {@code set(false)}
+     * unconditionally resets depth to zero regardless of how many nested
+     * {@link #enter()} calls are active.
      *
-     * <p>
-     * <b>Nesting:</b> This method does NOT support nesting properly. Setting to
-     * false
-     * will clear the context regardless of nesting depth.
-     * </p>
-     *
-     * @param isActive {@code true} to mark the thread as being in a leaf tick
-     *                 context,
-     *                 {@code false} to mark it as not being in such a context
-     * @deprecated Use {@link #enter()} with try-with-resources instead
+     * @param isActive {@code true} to activate (depth = 1), {@code false} to deactivate (depth = 0)
+     * @deprecated use {@link #enter()} with try-with-resources instead
      */
     @Deprecated
-    public static void set(boolean isActive) {
-        ContextHolder holder = context.get();
+    public static void set(final boolean isActive) {
+        final ContextHolder holder = CONTEXT.get();
         holder.depth = isActive ? 1 : 0;
+        logDebug("Set leaf tick context to {} (thread: {})", isActive);
+    }
 
+    // -------------------------------------------------------------------------
+    // Debug logging
+    // -------------------------------------------------------------------------
+
+    /**
+     * Emits a debug log message with the current thread name appended as the
+     * last argument. No-ops when {@link #DEBUG_MODE} is false.
+     *
+     * @param pattern SLF4J message pattern (must have exactly two {@code {}} placeholders)
+     * @param first   the first argument to interpolate
+     */
+    private static void logDebug(final String pattern, final Object first) {
         if (DEBUG_MODE) {
-            LOGGER.debug("Set leaf tick context to {} (thread: {})",
-                    isActive, Thread.currentThread().getName());
+            LOGGER.debug(pattern, first, Thread.currentThread().getName());
         }
     }
 
-    /**
-     * Legacy alias for {@link #isActive()}.
-     *
-     * @return {@code true} if the current thread is in a leaf tick context
-     * @deprecated Use {@link #isActive()} instead for clarity
-     */
-    @Deprecated
-    public static boolean get() {
-        return isActive();
-    }
+    // -------------------------------------------------------------------------
+    // Inner types
+    // -------------------------------------------------------------------------
 
     /**
-     * Internal holder for context state using primitive values to avoid boxing.
+     * Internal holder for the thread's context depth, using a primitive {@code int}
+     * to avoid {@link Boolean} boxing.
+     *
      * <p>
-     * <b>Memory Layout:</b>
-     * <ul>
-     * <li>Object header: 12 bytes</li>
-     * <li>int depth: 4 bytes</li>
-     * <li>Padding: 4 bytes (alignment)</li>
-     * <li>Total: ~24 bytes per thread</li>
-     * </ul>
-     * </p>
+     * <b>Memory layout (approximate):</b>
+     * object header (12 bytes) + {@code int depth} (4 bytes) + padding (4 bytes) ≈ 24 bytes.
      */
-    private static class ContextHolder {
+    private static final class ContextHolder {
+
         /**
-         * Nesting depth counter. 0 = inactive, >0 = active.
-         * Using int instead of boolean to support proper nesting.
+         * Nesting depth. {@code 0} = inactive; {@code > 0} = active.
+         * Incremented by {@link #enter()}, decremented by {@link ContextHandle#close()}.
          */
         int depth = 0;
     }
 
     /**
-     * AutoCloseable handle for automatic context management.
-     * <p>
-     * This lightweight object is created by {@link #enter()} and automatically
-     * decrements the context depth when closed. The object itself is very small
-     * (~16 bytes) and short-lived (typical scope: single method call).
-     * </p>
+     * Lightweight {@link AutoCloseable} handle returned by {@link #enter()}.
      *
      * <p>
-     * <b>Thread Safety:</b> This handle is NOT thread-safe and must only be
-     * used by the thread that created it. Passing it to another thread will
-     * cause incorrect behavior.
-     * </p>
+     * Decrements the context depth when closed. Idempotent — safe to call
+     * {@link #close()} more than once; subsequent calls are ignored.
+     *
+     * <p>
+     * <b>Thread safety:</b> Not thread-safe by design. Must only be used by the
+     * thread that called {@link #enter()}. Passing this handle to another thread
+     * will cause incorrect depth tracking.
+     *
+     * <p>
+     * <b>Memory:</b> ~16 bytes (object header + one reference + one boolean).
      */
     public static final class ContextHandle implements AutoCloseable {
+
         private final ContextHolder holder;
+
+        /** Guards against double-close without requiring synchronization. */
         private boolean closed = false;
 
-        private ContextHandle(ContextHolder holder) {
+        private ContextHandle(final ContextHolder holder) {
             this.holder = holder;
         }
 
         /**
          * Exits the leaf tick context by decrementing the depth counter.
-         * <p>
-         * This method is called automatically when the try-with-resources block exits.
-         * It's safe to call multiple times (idempotent).
-         * </p>
          *
          * <p>
-         * <b>Warning:</b> If depth becomes negative due to mismatched enter/exit calls,
-         * a warning is logged and depth is reset to 0.
-         * </p>
+         * Called automatically at the end of a try-with-resources block. Idempotent —
+         * subsequent calls after the first are ignored.
+         *
+         * <p>
+         * If depth becomes negative (mismatched enter/exit), a warning is logged
+         * and depth is reset to zero to prevent cascading incorrect state.
          */
         @Override
         public void close() {
-            if (!closed) {
-                closed = true;
-                holder.depth--;
+            if (closed) return;
+            closed = true;
 
-                if (DEBUG_MODE) {
-                    LOGGER.debug("Exited leaf tick context (depth: {}, thread: {})",
-                            holder.depth, Thread.currentThread().getName());
-                }
+            holder.depth--;
+            logDebug("Exited leaf tick context (depth: {}, thread: {})", holder.depth);
 
-                // Sanity check: depth should never be negative
-                if (holder.depth < 0) {
-                    LOGGER.error("Leaf tick context depth became negative! " +
-                            "This indicates mismatched enter/exit calls. Resetting to 0. (thread: {})",
-                            Thread.currentThread().getName());
-                    holder.depth = 0;
-                }
+            if (isDepthNegative()) {
+                logNegativeDepthError();
+                holder.depth = 0;
             }
+        }
+
+        /**
+         * Returns true if the depth counter has gone below zero, indicating a
+         * mismatched enter/exit call somewhere in the call stack.
+         *
+         * @return true if depth is negative
+         */
+        private boolean isDepthNegative() {
+            return holder.depth < 0;
+        }
+
+        /**
+         * Emits an error log for a negative depth condition, including the thread name
+         * to help identify which thread has the mismatched enter/exit.
+         */
+        private static void logNegativeDepthError() {
+            LOGGER.error(
+                    "Leaf tick context depth became negative — mismatched enter/exit calls detected. " +
+                            "Resetting to 0. (thread: {})",
+                    Thread.currentThread().getName());
         }
     }
 }
