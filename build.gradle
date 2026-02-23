@@ -6,7 +6,7 @@ plugins {
 
 subprojects { subproject ->
     // These modules have their own build.gradle files, so we exclude them from the root build.gradle
-    if (subproject.name == 'cis-debugger' || subproject.name == 'fabric') {
+    if (subproject.name == 'fabric') {
         return
     }
 

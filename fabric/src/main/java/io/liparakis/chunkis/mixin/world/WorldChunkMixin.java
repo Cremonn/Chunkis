@@ -10,46 +10,36 @@ import io.liparakis.chunkis.util.LeafTickContext;
 import io.liparakis.chunkis.util.VanillaChunkSnapshot;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.LeavesBlock;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.block.entity.BlockEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
-import org.slf4j.Logger;
 
 /**
- * Mixin for {@link WorldChunk} implementing player modification tracking and
- * restoration.
- *
+ * Mixin for {@link WorldChunk} that implements player modification tracking
+ * and restoration.
  * <p>
- * Provides the core functionality for Chunkis delta-based chunk modification
- * system:
- * <ul>
- * <li>Intercepts block changes to track player modifications in
- * {@link ChunkDelta}</li>
- * <li>Restores saved modifications when chunks are promoted from
- * ProtoChunk</li>
- * <li>Uses {@link VanillaChunkSnapshot} to distinguish player changes from
- * worldgen</li>
- * <li>Integrates with {@link GlobalChunkTracker} for reliable persistence</li>
- * </ul>
- *
+ * This mixin provides two core functionalities:
+ * <ol>
+ * <li>Tracks block changes made by players/non-generation systems</li>
+ * <li>Restores previously saved modifications when chunks are loaded</li>
+ * </ol>
  * <p>
- * <b>Thread Safety:</b> All block change tracking is restricted to the server
- * thread
- * to prevent concurrent modification issues. Natural processes (leaf decay) are
- * filtered
- * to avoid polluting the delta with non-player changes.
- *
+ * The tracking system uses {@link VanillaChunkSnapshot} to differentiate
+ * between generated blocks and player modifications, ensuring only actual
+ * changes are persisted to the delta.
  * <p>
- * <b>Note:</b> This mixin relies on {@link CommonChunkMixin} applying the
- * {@link ChunkisDeltaDuck} interface to the base chunk class.
+ * <b>Note:</b> This mixin relies on {@link CommonChunkMixin} being applied
+ * to the base {@link net.minecraft.world.chunk.Chunk} class for delta storage.
  *
  * @author Liparakis
  * @version 1.0
@@ -58,294 +48,368 @@ import org.slf4j.Logger;
 public class WorldChunkMixin {
 
     @Unique
-    private static final Logger LOGGER = Chunkis.LOGGER;
-
-    /**
-     * Immutable snapshot of the chunk's vanilla worldgen state.
-     * Used to filter player modifications from generated terrain.
-     */
-    @Unique
     private VanillaChunkSnapshot chunkis$vanillaSnapshot;
 
-    /**
-     * Re-entrancy guard to prevent tracking blocks set during restoration.
-     */
     @Unique
-    private boolean chunkis$isRestoring = false;
+    private volatile boolean chunkis$isRestoring = false;
 
-    /**
-     * Retrieves the chunk's delta via the ChunkisDeltaDuck interface.
-     *
-     * @return the chunk's delta instance
-     */
-    @Unique
-    private ChunkDelta chunkis$getDelta() {
-        return ((ChunkisDeltaDuck) this).chunkis$getDelta();
-    }
+    // -----------------------------------------------------------------------
+    // Mixin injection points
+    // -----------------------------------------------------------------------
 
     /**
      * Intercepts block state changes to track player modifications.
-     *
      * <p>
-     * This method implements sophisticated filtering to ensure only genuine player
-     * modifications are tracked:
-     * <ul>
-     * <li>Ignores client-side changes (no delta on client)</li>
-     * <li>Ignores changes during restoration (prevents recursion)</li>
-     * <li>Ignores changes before chunk is fully generated (FULL status
-     * required)</li>
-     * <li>Ignores natural leaf decay (tracked via LeafTickContext)</li>
-     * <li>Ignores changes from non-server threads (thread safety)</li>
-     * </ul>
-     *
+     * This method filters out generation-time changes, natural decay, and
+     * cross-thread modifications, capturing only intentional player edits
+     * to the delta.
      * <p>
-     * When a block is reverted to its vanilla state, the delta entry is removed.
-     * When a block differs from vanilla, it's recorded in the delta and the chunk
-     * is marked dirty in GlobalChunkTracker.
+     * <b>Performance Note:</b> This is on the hot path (called for every block
+     * change).
+     * Early exits minimize overhead for filtered cases.
      *
-     * @param position the block position being changed
-     * @param newState the new block state
-     * @param flags    the block update flags
-     * @param cir      callback info (unused)
+     * @param pos   the block position being modified
+     * @param state the new block state
+     * @param flags any existing flags
+     * @param cir   callback containing the previous block state
      */
+
     @Inject(method = "setBlockState", at = @At("HEAD"))
     private void chunkis$onSetBlockState(
-            BlockPos position,
-            BlockState newState,
-            int flags,
-            CallbackInfoReturnable<BlockState> cir) {
+            BlockPos pos, BlockState state, int flags, CallbackInfoReturnable<BlockState> cir) {
 
-        var chunk = (WorldChunk) (Object) this;
-
-        if (!shouldTrackBlockChange(chunk, position, newState)) {
+        if (!shouldTrackBlockChange(getWorldChunk(), state)) {
             return;
         }
 
-        trackBlockChange(chunk, position, newState);
+        if (!state.hasBlockEntity()) {
+            final int localX = pos.getX() & CisConstants.COORD_MASK;
+            final int localY = pos.getY();
+            final int localZ = pos.getZ() & CisConstants.COORD_MASK;
+            @SuppressWarnings("unchecked")
+            ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+            delta.removeBlockEntityData(localX, localY, localZ);
+        }
+
+        updateDeltaForBlockChange(pos, state);
     }
 
     /**
-     * Determines whether a block change should be tracked in the delta.
-     *
-     * <p>
-     * Applies multiple filters to exclude non-player or inappropriate changes.
-     *
-     * @param chunk    the chunk being modified
-     * @param position the block position
-     * @param newState the new block state
-     * @return true if this change should be tracked, false otherwise
+     * Intercepts block entity additions to proactively update the delta.
      */
-    @Unique
-    private boolean shouldTrackBlockChange(WorldChunk chunk, BlockPos position, BlockState newState) {
-        // Filter: Client-side changes
-        if (chunk.getWorld().isClient()) {
-            return false;
-        }
-
-        // Filter: Restoration in progress (prevents recursion)
-        if (chunkis$isRestoring) {
-            LOGGER.debug("Skipping block capture at {} during restoration", position);
-            return false;
-        }
-
-        // Filter: Chunk not fully generated
-        if (!ChunkStatus.FULL.equals(chunk.getStatus())) {
-            LOGGER.debug("Skipping block capture at {} due to status: {}", position, chunk.getStatus());
-            return false;
-        }
-
-        // Filter: No vanilla snapshot (shouldn't happen)
-        if (chunkis$vanillaSnapshot == null) {
-            LOGGER.error("Skipping block capture at {} due to missing snapshot", position);
-            return false;
-        }
-
-        // Filter: Natural leaf decay
-        if (isNaturalLeafDecay(newState)) {
-            return false;
-        }
-
-        // Filter: Wrong thread (thread safety)
-        return isServerThread(chunk);
-    }
-
-    /**
-     * Checks if a state change represents natural leaf decay.
-     *
-     * @param state the block state being placed
-     * @return true if this is natural decay, false otherwise
-     */
-    @Unique
-    private boolean isNaturalLeafDecay(BlockState state) {
-        return state.getBlock() instanceof LeavesBlock && LeafTickContext.isActive();
-    }
-
-    /**
-     * Verifies the current thread is the server thread.
-     *
-     * @param chunk the chunk being modified
-     * @return true if on server thread, false otherwise
-     */
-    @Unique
-    private boolean isServerThread(WorldChunk chunk) {
-        if (chunk.getWorld() instanceof ServerWorld serverWorld) {
-            return serverWorld.getServer().getThread() == Thread.currentThread();
-        }
-        return false;
-    }
-
-    /**
-     * Records a block change in the chunk delta.
-     *
-     * <p>
-     * Compares the new state against the vanilla snapshot:
-     * <ul>
-     * <li>If matching vanilla: removes delta entry (reversion)</li>
-     * <li>If different from vanilla: adds/updates delta entry</li>
-     * </ul>
-     *
-     * @param chunk    the chunk being modified
-     * @param position the block position
-     * @param newState the new block state
-     */
-    @Unique
-    private void trackBlockChange(WorldChunk chunk, BlockPos position, BlockState newState) {
-        int localX = position.getX() & CisConstants.COORD_MASK;
-        int localY = position.getY();
-        int localZ = position.getZ() & CisConstants.COORD_MASK;
-
-        BlockState vanillaState = chunkis$vanillaSnapshot.getVanillaState(localX, localY, localZ);
-        ChunkDelta delta = chunkis$getDelta();
-
-        // Block reverted to vanilla: remove from delta
-        if (vanillaState != null && vanillaState.equals(newState)) {
-            handleBlockReversion(delta, localX, localY, localZ);
+    @SuppressWarnings("unchecked")
+    @Inject(method = "setBlockEntity", at = @At("RETURN"))
+    private void chunkis$onSetBlockEntity(final BlockEntity blockEntity, final CallbackInfo ci) {
+        if (!shouldTrackBlockChange(getWorldChunk(), getWorldChunk().getBlockState(blockEntity.getPos()))) {
             return;
         }
-
-        // Block differs from vanilla: record in delta
-        handleBlockModification(chunk, delta, localX, localY, localZ, newState);
-    }
-
-    /**
-     * Handles a block being reverted to its vanilla state.
-     *
-     * @param delta  the chunk delta
-     * @param localX local X coordinate (0-15)
-     * @param localY absolute Y coordinate
-     * @param localZ local Z coordinate (0-15)
-     */
-    @Unique
-    private void handleBlockReversion(ChunkDelta delta, int localX, int localY, int localZ) {
-        if (delta.hasBlockChange(localX, localY, localZ)) {
-            delta.removeBlockChange(localX, localY, localZ);
+        if (getWorldChunk().getWorld() instanceof ServerWorld serverWorld) {
+            try {
+                io.liparakis.chunkis.util.ChunkBlockEntityCapture.captureBlockEntity(
+                        blockEntity,
+                        serverWorld.getRegistryManager(),
+                        (ChunkDelta<BlockState, NbtCompound>) getDelta());
+                GlobalChunkTracker.markDirty(getWorldChunk());
+            } catch (Exception e) {
+                Chunkis.LOGGER.error("Chunkis: Failed to proactively capture added block entity at {}",
+                        blockEntity.getPos(), e);
+            }
         }
     }
 
     /**
-     * Handles a block modification that differs from vanilla.
-     *
-     * @param chunk    the chunk being modified
-     * @param delta    the chunk delta
-     * @param localX   local X coordinate (0-15)
-     * @param localY   absolute Y coordinate
-     * @param localZ   local Z coordinate (0-15)
-     * @param newState the new block state
+     * Intercepts block entity removals to proactively update the delta.
      */
-    @Unique
-    private void handleBlockModification(
-            WorldChunk chunk,
-            ChunkDelta delta,
-            int localX,
-            int localY,
-            int localZ,
-            BlockState newState) {
+    @SuppressWarnings("unchecked")
+    @Inject(method = "removeBlockEntity", at = @At("HEAD"))
+    private void chunkis$onRemoveBlockEntity(final BlockPos pos, final CallbackInfo ci) {
+        if (!shouldTrackBlockChange(getWorldChunk(), getWorldChunk().getBlockState(pos))) {
+            return;
+        }
+        final int localX = pos.getX() & CisConstants.COORD_MASK;
+        final int localY = pos.getY();
+        final int localZ = pos.getZ() & CisConstants.COORD_MASK;
 
-        delta.addBlockChange(localX, localY, localZ, newState);
-        GlobalChunkTracker.markDirty(chunk);
+        ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+        delta.removeBlockEntityData(localX, localY, localZ);
+        GlobalChunkTracker.markDirty(getWorldChunk());
     }
 
     /**
      * Intercepts WorldChunk construction from ProtoChunk to restore saved
      * modifications.
-     *
      * <p>
-     * Executes the following restoration workflow:
+     * When a chunk is promoted from ProtoChunk to WorldChunk (after generation
+     * completes), this method:
      * <ol>
-     * <li>Captures a vanilla snapshot from the ProtoChunk (worldgen state)</li>
-     * <li>Retrieves the delta from the ProtoChunk (loaded from disk/memory)</li>
-     * <li>Applies all delta modifications to the WorldChunk</li>
+     * <li>Captures a snapshot of the vanilla-generated state</li>
+     * <li>Restores block changes from the delta</li>
      * <li>Optimizes the delta by removing redundant entries</li>
-     * <li>Registers the chunk with GlobalChunkTracker for dirty tracking</li>
      * </ol>
-     *
      * <p>
-     * The re-entrancy guard {@link #chunkis$isRestoring} prevents modifications
-     * made during restoration from being tracked as player changes.
+     * The restoration flag prevents the restored blocks from being re-tracked as
+     * new changes.
      *
-     * @param world        the server world context
-     * @param protoChunk   the source ProtoChunk containing worldgen state
-     * @param entityLoader the entity loader (unused)
+     * @param world        the server world
+     * @param proto        the ProtoChunk being promoted
+     * @param entityLoader the entity loader for the chunk
      * @param ci           callback info
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
     private void chunkis$onConstructFromProto(
-            ServerWorld world,
-            ProtoChunk protoChunk,
-            WorldChunk.EntityLoader entityLoader,
-            CallbackInfo ci) {
+            final ServerWorld world,
+            final ProtoChunk proto,
+            final WorldChunk.EntityLoader entityLoader,
+            final CallbackInfo ci) {
 
-        var chunk = (WorldChunk) (Object) this;
+        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(proto);
 
-        // Always capture vanilla snapshot
-        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(protoChunk);
-
-        // Attempt restoration if delta exists
-        if (protoChunk instanceof ChunkisDeltaDuck deltaProvider) {
-            restoreDeltaFromProto(world, chunk, deltaProvider);
+        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(proto);
+        if (protoDelta == null || protoDelta.isEmpty()) {
+            return;
         }
+        restoreChunkFromDelta(world, getWorldChunk(), proto, protoDelta);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tracking guards
+    // -----------------------------------------------------------------------
+
+    /**
+     * Determines if a block change should be tracked in the delta.
+     * <p>
+     * Block changes are ignored if:
+     * <ul>
+     * <li>The chunk is client-side</li>
+     * <li>Restoration is in progress</li>
+     * <li>The chunk is not fully generated</li>
+     * <li>The change is from natural leaf decay</li>
+     * <li>The change is from a different thread</li>
+     * </ul>
+     * <p>
+     * A null vanilla snapshot no longer prevents tracking. If the snapshot
+     * is missing (unexpected code path), the change is tracked without
+     * vanilla deduplication to prevent silent data loss.
+     *
+     * @param chunk the chunk being modified
+     * @param state the new block state
+     * @return {@code true} if the change should be tracked
+     */
+    @Unique
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
+    private boolean shouldTrackBlockChange(final WorldChunk chunk, final BlockState state) {
+        if (chunk.getWorld().isClient()) {
+            return false;
+        }
+        if (chunkis$isRestoring) {
+            return false;
+        }
+        if (!ChunkStatus.FULL.equals(chunk.getStatus())) {
+            return false;
+        }
+        // Leaf decay is filtered before the snapshot-null warning so the warning
+        // does not fire for changes that will be discarded anyway.
+        if (isNaturalLeafDecay(state)) {
+            return false;
+        }
+        if (chunkis$vanillaSnapshot == null) {
+            Chunkis.LOGGER.debug(
+                    "Chunkis: Tracking block change without vanilla snapshot for chunk {} "
+                            + "- deduplication disabled",
+                    chunk.getPos());
+        }
+        if (!isOnServerThread(chunk)) {
+            Chunkis.LOGGER.warn(
+                    "Chunkis: Block change rejected - not on server thread for chunk {} (thread: {})",
+                    chunk.getPos(), Thread.currentThread().getName());
+            return false;
+        }
+        return true;
     }
 
     /**
-     * Restores delta modifications from a ProtoChunk to a WorldChunk.
+     * Checks if a block change is from natural leaf decay.
      *
-     * @param world         the server world
-     * @param chunk         the target WorldChunk
-     * @param deltaProvider the ProtoChunk with delta interface
+     * @param state the block state
+     * @return {@code true} if this is natural leaf decay
      */
     @Unique
-    private void restoreDeltaFromProto(ServerWorld world, WorldChunk chunk, ChunkisDeltaDuck deltaProvider) {
-        ChunkDelta protoDelta = deltaProvider.chunkis$getDelta();
+    private boolean isNaturalLeafDecay(final BlockState state) {
+        return state.getBlock() instanceof LeavesBlock && LeafTickContext.isActive();
+    }
 
-        if (protoDelta.isEmpty()) {
-            return;
+    /**
+     * Returns {@code true} if the current thread is the server thread for the
+     * world owning this chunk.
+     *
+     * @param chunk the chunk whose world's server thread is checked
+     * @return {@code true} if this call is on the server thread
+     */
+    @Unique
+    private boolean isOnServerThread(final WorldChunk chunk) {
+        if (!(chunk.getWorld() instanceof ServerWorld serverWorld)) {
+            return false;
+        }
+        // Reference equality is intentional: we are comparing thread identity,
+        // not thread names or logical equality.
+        return serverWorld.getServer().getThread() == Thread.currentThread();
+    }
+
+    // -----------------------------------------------------------------------
+    // Delta mutation helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Updates the delta to reflect a block change.
+     * <p>
+     * If a vanilla snapshot exists and the block matches vanilla state,
+     * the delta entry is removed. Otherwise, the change is recorded.
+     * <p>
+     * When the vanilla snapshot is null (unexpected construction path),
+     * the change is tracked unconditionally without deduplication to
+     * prevent silent data loss.
+     *
+     * @param pos   the block position
+     * @param state the new block state
+     */
+    @Unique
+    @SuppressWarnings({"unchecked", "rawtypes"}) // Raw ChunkDelta: getDelta() returns wildcard;
+    // addBlockChange/removeBlockChange are type-erased
+    private void updateDeltaForBlockChange(final BlockPos pos, final BlockState state) {
+        final int localX = pos.getX() & CisConstants.COORD_MASK;
+        final int localY = pos.getY();
+        final int localZ = pos.getZ() & CisConstants.COORD_MASK;
+
+        final ChunkDelta delta = getDelta();
+
+        if (chunkis$vanillaSnapshot != null) {
+            final BlockState vanillaState = chunkis$vanillaSnapshot.getVanillaState(localX, localY, localZ);
+            if (isRevertedToVanilla(vanillaState, state)) {
+                delta.removeBlockChange(localX, localY, localZ);
+                return;
+            }
         }
 
-        ChunkDelta chunkDelta = chunkis$getDelta();
+        delta.addBlockChange(localX, localY, localZ, state);
+        GlobalChunkTracker.markDirty(getWorldChunk());
+    }
+
+    /**
+     * Checks if a block has been reverted to its vanilla state.
+     *
+     * @param vanillaState the original vanilla state
+     * @param currentState the current state
+     * @return {@code true} if the block matches vanilla
+     */
+    @Unique
+    private boolean isRevertedToVanilla(final BlockState vanillaState, final BlockState currentState) {
+        return vanillaState != null && vanillaState.equals(currentState);
+    }
+
+    // -----------------------------------------------------------------------
+    // Restoration helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Resolves the typed {@link ChunkDelta} from a {@link ProtoChunk}'s
+     * {@link ChunkisDeltaDuck} interface.
+     *
+     * <p>
+     * Returns {@code null} if the proto does not implement
+     * {@link ChunkisDeltaDuck} or if the delta itself is {@code null}.
+     *
+     * @param proto the ProtoChunk to resolve the delta from
+     * @return the typed delta, or {@code null} if unavailable
+     */
+    @Unique
+    @SuppressWarnings("unchecked") // Safe: chunkis$getDelta returns our own typed delta
+    private ChunkDelta<BlockState, NbtCompound> resolveProtoDelta(final ProtoChunk proto) {
+        if (!(proto instanceof ChunkisDeltaDuck deltaDuck)) {
+            return null;
+        }
+        return (ChunkDelta<BlockState, NbtCompound>) deltaDuck.chunkis$getDelta();
+    }
+
+    /**
+     * Restores chunk modifications from a delta.
+     * <p>
+     * Sets the restoration flag to prevent re-tracking of restored blocks,
+     * then delegates to {@link ChunkRestorer} for the actual restoration logic.
+     * <p>
+     * If optimization occurs during restoration, the delta is marked dirty
+     * to ensure it's re-saved with redundant entries removed.
+     *
+     * @param world      the server world
+     * @param chunk      the chunk being restored
+     * @param proto      the ProtoChunk source
+     * @param protoDelta the delta to restore from
+     */
+    @Unique
+    @SuppressWarnings("unchecked") // Safe: getDelta returns our own typed delta
+    private void restoreChunkFromDelta(
+            final ServerWorld world,
+            final WorldChunk chunk,
+            final ProtoChunk proto,
+            final ChunkDelta<BlockState, NbtCompound> protoDelta) {
+
+        final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
 
         try {
             chunkis$isRestoring = true;
 
-            boolean wasOptimized = ChunkRestorer.restore(
+            final boolean wasOptimized = ChunkRestorer.restore(
                     world,
                     chunk,
                     protoDelta,
-                    chunkDelta,
+                    selfDelta,
                     chunkis$vanillaSnapshot);
 
             if (wasOptimized) {
-                chunkDelta.markDirty();
+                selfDelta.markDirty();
             }
 
-            protoDelta.markSaved();
-
-            // Register immediately after restore to ensure tracking
             GlobalChunkTracker.markDirty(chunk);
 
-        } catch (Exception e) {
-            LOGGER.error("Failed to restore chunk {}", chunk.getPos(), e);
+        } catch (final Exception e) {
+            Chunkis.LOGGER.error("Chunkis: Failed to restore chunk {}", proto.getPos(), e);
         } finally {
             chunkis$isRestoring = false;
         }
+
+        protoDelta.markSaved();
+    }
+
+    // -----------------------------------------------------------------------
+    // Self-cast helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Retrieves the delta for this chunk by casting {@code this} to
+     * {@link ChunkisDeltaDuck}.
+     *
+     * <p>
+     * This is safe because {@link CommonChunkMixin} is applied to the base
+     * {@link net.minecraft.world.chunk.Chunk} class, guaranteeing all
+     * {@link WorldChunk} instances implement {@link ChunkisDeltaDuck}.
+     *
+     * @return the chunk delta
+     */
+    @Unique
+    private ChunkDelta<?, ?> getDelta() {
+        return ((ChunkisDeltaDuck) this).chunkis$getDelta();
+    }
+
+    /**
+     * Casts this mixin instance to {@link WorldChunk}.
+     *
+     * <p>
+     * This is the standard Mixin self-cast pattern and is safe because this
+     * mixin targets {@link WorldChunk} exclusively.
+     *
+     * @return this instance as {@link WorldChunk}
+     */
+    @Unique
+    private WorldChunk getWorldChunk() {
+        return (WorldChunk) (Object) this;
     }
 }

@@ -22,12 +22,9 @@
     "chunkis.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=${loader_version}",
-    "minecraft": "~${minecraft_version}",
+    "fabricloader": ">=0.16.5",
+    "minecraft": "~1.21.9",
     "java": ">=21",
     "fabric-api": "*"
-  },
-  "suggests": {
-    "another-mod": "*"
   }
 }
