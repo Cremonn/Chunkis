@@ -10,7 +10,7 @@ import io.liparakis.chunkis.core.ChunkDelta;
  * @version 1.0
  */
 public interface ChunkisDeltaDuck {
-    ChunkDelta chunkis$getDelta();
+    ChunkDelta<?, ?> chunkis$getDelta();
 
-    void chunkis$setDelta(ChunkDelta delta);
+    void chunkis$setDelta(ChunkDelta<?, ?> delta);
 }

@@ -187,7 +187,7 @@ public abstract class AbstractCisDecoder<S, N> {
 
             S state = getStateFromPalette(globalIdx);
 
-            if (state != null && !stateAdapter.isAir(state)) {
+            if (state != null) {
                 delta.addBlockChange(
                         (byte) x,
                         (sectionY << BITS_PER_NIBBLE) + y,
@@ -209,7 +209,9 @@ public abstract class AbstractCisDecoder<S, N> {
             localPaletteBuffer[i] = (int) reader.read(globalBits);
         }
 
-        int bitsPerBlock = calculateBitsNeeded(localSize);
+        // the localSize was encoded as-is, but the bitsPerBlock used localSize + 1 to
+        // fit index 0 (null)
+        int bitsPerBlock = calculateBitsNeeded(localSize + 1);
 
         // Read all blocks in YZX order
         for (int y = 0; y < SECTION_SIZE; y++) {
@@ -217,14 +219,22 @@ public abstract class AbstractCisDecoder<S, N> {
                 for (int x = 0; x < SECTION_SIZE; x++) {
                     int localIndex = bitsPerBlock > 0 ? (int) reader.read(bitsPerBlock) : 0;
 
-                    if (localIndex >= localSize) {
-                        localIndex = 0;
+                    // index 0 means no change (null)
+                    if (localIndex == 0) {
+                        continue;
                     }
 
-                    int globalIndex = localPaletteBuffer[localIndex];
+                    // shift back to 0-based palette index
+                    int paletteIndex = localIndex - 1;
+
+                    if (paletteIndex >= localSize) {
+                        paletteIndex = 0;
+                    }
+
+                    int globalIndex = localPaletteBuffer[paletteIndex];
                     S state = getStateFromPalette(globalIndex);
 
-                    if (state != null && !stateAdapter.isAir(state)) {
+                    if (state != null) {
                         delta.addBlockChange(
                                 (byte) x,
                                 (sectionY << BITS_PER_NIBBLE) + y,

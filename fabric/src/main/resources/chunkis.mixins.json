@@ -10,7 +10,11 @@
     "storage.ThreadedAnvilChunkStorageMixin",
     "world.WorldChunkMixin",
     "network.ChunkHolderMixin",
-    "world.SpawnHelperMixin"
+    "world.SpawnHelperMixin",
+    "world.BlockEntityMixin",
+    "storage.EntityChunkDataAccessMixin",
+    "world.ServerWorldMixin",
+    "entity.EntityMixin"
   ],
   "injectors": {
     "defaultRequire": 1
