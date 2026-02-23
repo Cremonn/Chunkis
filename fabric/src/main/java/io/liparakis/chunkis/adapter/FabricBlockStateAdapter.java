@@ -9,36 +9,105 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * High-performance Fabric implementation of BlockStateAdapter with aggressive
- * caching.
+ * High-performance Fabric implementation of BlockStateAdapter with aggressive caching.
  *
  * <p>
  * This adapter optimizes for Minecraft's immutable block state system where:
  * <ul>
  * <li>Block properties are defined at registration time and never change</li>
  * <li>Property values are finite and immutable</li>
- * <li>Block states are queried millions of times per second</li>
+ * <li>Block states are queried millions of times per second in chunk operations</li>
  * </ul>
  *
  * <p>
  * Thread-safe for concurrent access.
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, BlockState, Property<?>> {
 
-    // Caches for immutable block metadata
-    private final Map<Block, List<Property<?>>> blockPropertiesCache = new ConcurrentHashMap<>(256);
-    private final Map<Property<?>, List<Object>> propertyValuesCache = new ConcurrentHashMap<>(512);
-    private final Map<Property<?>, Map<Object, Integer>> valueIndexCache = new ConcurrentHashMap<>(512);
-
-    // Shared immutable empty list to avoid allocation
+    // Shared immutable sentinels to avoid allocation for blocks with no properties.
     private static final List<Property<?>> EMPTY_PROPERTIES = Collections.emptyList();
-    private static final List<Object> EMPTY_VALUES = Collections.emptyList();
+    private static final List<Object>      EMPTY_VALUES      = Collections.emptyList();
 
-    // Reusable comparator instance
+    // Stable comparator instance: string-based for deterministic, cross-type ordering
+    // across enums, integers, and booleans.
     private static final Comparator<Object> VALUE_COMPARATOR = Comparator.comparing(Object::toString);
+
+    // Caches for immutable block metadata — safe to retain indefinitely since
+    // block properties and their values are fixed at registration time.
+    private final Map<Block,       List<Property<?>>>     blockPropertiesCache = new ConcurrentHashMap<>(256);
+    private final Map<Property<?>, List<Object>>          propertyValuesCache  = new ConcurrentHashMap<>(512);
+    private final Map<Property<?>, Map<Object, Integer>>  valueIndexCache      = new ConcurrentHashMap<>(512);
+
+    // -------------------------------------------------------------------------
+    // Reflection bootstrap — resolves Property.getValues() once at class load.
+    // This handles remapped method names across Minecraft mapping sets
+    // (e.g., intermediary vs. named) and return type changes (List vs. Collection).
+    // -------------------------------------------------------------------------
+
+    private static final java.lang.reflect.Method GET_VALUES_METHOD = resolveGetValuesMethod();
+
+    /**
+     * Attempts to resolve {@code Property.getValues()} by name first,
+     * then falls back to scanning public methods by signature.
+     *
+     * @return the resolved Method, or null if resolution fails entirely
+     */
+    private static java.lang.reflect.Method resolveGetValuesMethod() {
+        try {
+            // Primary: resolve by name (works in dev/named mappings)
+            return Property.class.getMethod("getValues");
+        } catch (final NoSuchMethodException e) {
+            // Fallback: scan by signature (handles intermediary/production mappings)
+            return scanForValuesMethod();
+        }
+    }
+
+    /**
+     * Scans all public methods on {@link Property} to find one that matches
+     * the expected signature of {@code getValues()}: no parameters, returns a Collection.
+     *
+     * @return the matching Method, or null if none found
+     */
+    private static java.lang.reflect.Method scanForValuesMethod() {
+        for (final java.lang.reflect.Method method : Property.class.getMethods()) {
+            if (isValuesMethod(method)) return method;
+        }
+        return null;
+    }
+
+    /**
+     * Returns true if the given method matches the expected signature of
+     * {@code getValues()}: zero parameters and a Collection return type,
+     * excluding known false-positive methods.
+     *
+     * @param method the method to evaluate
+     * @return true if the method is a candidate for getValues()
+     */
+    private static boolean isValuesMethod(final java.lang.reflect.Method method) {
+        return Collection.class.isAssignableFrom(method.getReturnType())
+                && method.getParameterCount() == 0
+                && !isExcludedReturnType(method.getReturnType());
+    }
+
+    /**
+     * Returns true if the return type is a known false-positive that should
+     * be excluded during method scanning (e.g., {@code getName()}, {@code getType()}).
+     *
+     * @param returnType the return type to check
+     * @return true if the type should be excluded from matching
+     */
+    private static boolean isExcludedReturnType(final Class<?> returnType) {
+        return returnType.equals(Class.class)
+                || returnType.equals(String.class)
+                || returnType.equals(Optional.class);
+    }
+
+    // -------------------------------------------------------------------------
+    // BlockStateAdapter API
+    // -------------------------------------------------------------------------
 
     /**
      * Extracts the block from a block state.
@@ -48,7 +117,7 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @throws NullPointerException if state is null
      */
     @Override
-    public Block getBlock(BlockState state) {
+    public Block getBlock(final BlockState state) {
         Objects.requireNonNull(state, "BlockState cannot be null");
         return state.getBlock();
     }
@@ -58,27 +127,16 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      *
      * <p>
      * Block properties are defined at registration and never change,
-     * making them ideal for caching.
+     * making them safe to cache indefinitely.
      *
      * @param block the block
      * @return unmodifiable list of properties
      * @throws NullPointerException if block is null
      */
     @Override
-    public List<Property<?>> getProperties(Block block) {
+    public List<Property<?>> getProperties(final Block block) {
         Objects.requireNonNull(block, "Block cannot be null");
-
-        return blockPropertiesCache.computeIfAbsent(block, b -> {
-            Collection<Property<?>> properties = b.getStateManager().getProperties();
-
-            // Fast path for blocks without properties (common case)
-            if (properties.isEmpty()) {
-                return EMPTY_PROPERTIES;
-            }
-
-            // Create immutable copy to prevent external modification
-            return List.copyOf(properties);
-        });
+        return blockPropertiesCache.computeIfAbsent(block, this::resolveProperties);
     }
 
     /**
@@ -89,7 +147,7 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @throws NullPointerException if property is null
      */
     @Override
-    public String getPropertyName(Property<?> property) {
+    public String getPropertyName(final Property<?> property) {
         Objects.requireNonNull(property, "Property cannot be null");
         return property.getName();
     }
@@ -97,84 +155,25 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
     /**
      * Returns an immutable list of possible values for a property with caching.
      *
+     * <p>
+     * Uses reflection to handle method signature differences across Minecraft versions,
+     * with a direct-call fallback if reflection fails.
+     *
      * @param property the property
      * @return unmodifiable list of values
      * @throws NullPointerException if property is null
      */
     @Override
-    public List<Object> getPropertyValues(Property<?> property) {
+    public List<Object> getPropertyValues(final Property<?> property) {
         Objects.requireNonNull(property, "Property cannot be null");
-
-        return propertyValuesCache.computeIfAbsent(property, p -> {
-            // Use reflection to get values to handle signature changes (Collection vs List)
-            // and mapping differences across versions
-            Collection<?> values;
-            try {
-                values = getPropertyValuesReflectively(p);
-            } catch (Exception e) {
-                // Fallback to direct call if reflection fails (unlikely, but safe)
-                // This might throw NoSuchMethodError if signature mismatch exists,
-                // but we tried reflection first.
-                values = p.getValues();
-            }
-
-            if (values.isEmpty()) {
-                return EMPTY_VALUES;
-            }
-
-            // Store as List<Object> for API compatibility
-            return List.copyOf(values);
-        });
-    }
-
-    // Cache the method lookup
-    private static final java.lang.reflect.Method GET_VALUES_METHOD;
-    static {
-        java.lang.reflect.Method m = null;
-        try {
-            // Try finding by name first (dev env)
-            m = Property.class.getMethod("getValues");
-        } catch (NoSuchMethodException e) {
-            // Fallback: find by signature (returns Collection/List, no args)
-            // This handles remapped names (intermediary/prod) and return type changes
-            for (java.lang.reflect.Method method : Property.class.getMethods()) {
-                if (Collection.class.isAssignableFrom(method.getReturnType()) &&
-                        method.getParameterCount() == 0 &&
-                        !method.getReturnType().equals(Class.class) && // exclude getType
-                        !method.getReturnType().equals(String.class) && // exclude getName
-                        !method.getReturnType().equals(Optional.class) // exclude parse
-                ) {
-                    m = method;
-                    break;
-                }
-            }
-        }
-        GET_VALUES_METHOD = m;
-    }
-
-    /**
-     * Reflectively calls {@code Property.getValues()}.
-     * <p>
-     * This handles cases where the method signature might vary between Minecraft
-     * versions
-     * or mappings (e.g., returning List vs Collection).
-     *
-     * @param property The property to retrieve values from.
-     * @return A collection of allowed values.
-     * @throws Exception If reflection fails.
-     */
-    private static Collection<?> getPropertyValuesReflectively(Property<?> property) throws Exception {
-        if (GET_VALUES_METHOD != null) {
-            return (Collection<?>) GET_VALUES_METHOD.invoke(property);
-        }
-        return property.getValues();
+        return propertyValuesCache.computeIfAbsent(property, this::resolvePropertyValues);
     }
 
     /**
      * Gets the index of the current value of a property in the block state.
      *
      * <p>
-     * Optimized with O(1) index lookup using cached value-to-index mapping.
+     * Optimized with O(1) index lookup using a cached value-to-index mapping.
      *
      * @param state    the block state
      * @param property the property to query
@@ -182,53 +181,38 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @throws NullPointerException if state or property is null
      */
     @Override
-    public int getValueIndex(BlockState state, Property<?> property) {
+    public int getValueIndex(final BlockState state, final Property<?> property) {
         Objects.requireNonNull(state, "BlockState cannot be null");
         Objects.requireNonNull(property, "Property cannot be null");
-
-        // Get current value from state
-        Comparable<?> currentValue = state.get(property);
-
-        // Use cached index mapping for O(1) lookup
-        Map<Object, Integer> indexMap = getOrCreateIndexMap(property);
-        return indexMap.getOrDefault(currentValue, -1);
+        final Comparable<?> currentValue = state.get(property);
+        return getOrCreateIndexMap(property).getOrDefault(currentValue, -1);
     }
 
     /**
      * Creates a new block state with the specified property value.
      *
      * <p>
-     * Optimized with direct indexed access instead of creating ArrayList
-     * and performing linear search.
+     * Uses direct indexed access into the cached values list, avoiding
+     * ArrayList creation and linear indexOf searches on the hot path.
      *
      * @param state      the original block state
      * @param property   the property to modify
      * @param valueIndex the index of the desired value
-     * @return new block state with the property set, or original state if index is
-     *         invalid
+     * @return new block state with the property set, or original state if index is invalid
      * @throws NullPointerException if state or property is null
      */
     @Override
-    public BlockState withProperty(BlockState state, Property<?> property, int valueIndex) {
+    public BlockState withProperty(
+            final BlockState state,
+            final Property<?> property,
+            final int valueIndex) {
         Objects.requireNonNull(state, "BlockState cannot be null");
         Objects.requireNonNull(property, "Property cannot be null");
 
-        // Get cached values list
-        List<Object> values = getPropertyValues(property);
+        final List<Object> values = getPropertyValues(property);
+        if (isOutOfBounds(valueIndex, values)) return state;
 
-        // Bounds check
-        if (valueIndex < 0 || valueIndex >= values.size()) {
-            return state;
-        }
-
-        // Direct indexed access - no ArrayList creation or indexOf search
-        Object value = values.get(valueIndex);
-
-        // Type-safe cast: value comes from property.getValues()
-        @SuppressWarnings("rawtypes")
-        Property rawProperty = property;
-
-        return state.with(rawProperty, (Comparable) value);
+        return applyPropertyValue(state, property, values.get(valueIndex));
     }
 
     /**
@@ -239,7 +223,7 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @throws NullPointerException if block is null
      */
     @Override
-    public BlockState getDefaultState(Block block) {
+    public BlockState getDefaultState(final Block block) {
         Objects.requireNonNull(block, "Block cannot be null");
         return block.getDefaultState();
     }
@@ -252,7 +236,7 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @throws NullPointerException if state is null
      */
     @Override
-    public boolean isAir(BlockState state) {
+    public boolean isAir(final BlockState state) {
         Objects.requireNonNull(state, "BlockState cannot be null");
         return state.isAir();
     }
@@ -261,8 +245,8 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * Returns a comparator for property values.
      *
      * <p>
-     * Uses string representation for deterministic, stable sorting
-     * across different property value types (enums, integers, booleans).
+     * Uses string representation for deterministic, stable sorting across
+     * different property value types (enums, integers, booleans).
      *
      * @return comparator based on string representation
      */
@@ -271,29 +255,144 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         return VALUE_COMPARATOR;
     }
 
+    // -------------------------------------------------------------------------
+    // Resolution helpers
+    // -------------------------------------------------------------------------
+
     /**
-     * Gets or creates a value-to-index mapping for O(1) lookups.
+     * Resolves the property list for the given block, returning the shared
+     * empty sentinel if the block has no properties.
+     *
+     * @param block the block to inspect
+     * @return immutable list of properties, never null
+     */
+    private List<Property<?>> resolveProperties(final Block block) {
+        final Collection<Property<?>> properties = block.getStateManager().getProperties();
+        // Fast path for the common case of stateless blocks (e.g., stone)
+        return properties.isEmpty() ? EMPTY_PROPERTIES : List.copyOf(properties);
+    }
+
+    /**
+     * Resolves the value list for the given property using reflection with
+     * a direct-call fallback. Returns the shared empty sentinel for properties
+     * with no values.
+     *
+     * @param property the property to inspect
+     * @return immutable list of values, never null
+     */
+    private List<Object> resolvePropertyValues(final Property<?> property) {
+        final Collection<?> values = safeGetValues(property);
+        return values.isEmpty() ? EMPTY_VALUES : List.copyOf(values);
+    }
+
+    /**
+     * Invokes {@code property.getValues()} via the resolved reflective method,
+     * falling back to a direct call if reflection throws.
+     *
      * <p>
-     * This cache allows us to find the index of a property value in constant time,
-     * avoiding linear scans of the values list.
+     * The fallback avoids a hard failure during class initialization and provides
+     * resilience against unexpected mapping environments.
+     *
+     * @param property the property to query
+     * @return the raw collection of values
+     */
+    private static Collection<?> safeGetValues(final Property<?> property) {
+        try {
+            return invokeGetValues(property);
+        } catch (final Exception e) {
+            // Fallback to direct call if reflection fails (e.g., access restrictions)
+            return property.getValues();
+        }
+    }
+
+    /**
+     * Reflectively invokes {@code Property.getValues()} using the pre-resolved method.
+     * Falls back to a direct call if the method could not be resolved at class load.
+     *
+     * @param property the property to query
+     * @return the raw collection of allowed values
+     * @throws Exception if reflective invocation fails
+     */
+    private static Collection<?> invokeGetValues(final Property<?> property) throws Exception {
+        if (GET_VALUES_METHOD != null) {
+            return (Collection<?>) GET_VALUES_METHOD.invoke(property);
+        }
+        // Direct call fallback — used when reflection resolution failed entirely
+        return property.getValues();
+    }
+
+    // -------------------------------------------------------------------------
+    // Index map
+    // -------------------------------------------------------------------------
+
+    /**
+     * Gets or creates an O(1) value-to-index mapping for the given property.
+     *
+     * <p>
+     * This cache allows index lookups to avoid linear scans of the values list,
+     * critical for high-frequency block state queries during chunk processing.
+     *
      * <p>
      * Package-private for testing visibility.
      *
-     * @param property The property to create an index map for.
-     * @return A map from value object to its integer index.
+     * @param property the property to build or retrieve an index map for
+     * @return unmodifiable map of value → index
      */
-    Map<Object, Integer> getOrCreateIndexMap(Property<?> property) {
-        return valueIndexCache.computeIfAbsent(property, p -> {
-            List<Object> values = getPropertyValues(p);
-            // Create map with initial capacity to avoid resizing
-            Map<Object, Integer> indexMap = new HashMap<>(values.size());
+    Map<Object, Integer> getOrCreateIndexMap(final Property<?> property) {
+        return valueIndexCache.computeIfAbsent(property, this::buildIndexMap);
+    }
 
-            // Populate the map: Value -> Index
-            for (int i = 0; i < values.size(); i++) {
-                indexMap.put(values.get(i), i);
-            }
+    /**
+     * Builds a value-to-index map for the given property by iterating
+     * over its cached values list.
+     *
+     * @param property the property to index
+     * @return unmodifiable map of value → index
+     */
+    private Map<Object, Integer> buildIndexMap(final Property<?> property) {
+        final List<Object> values = getPropertyValues(property);
+        // Pre-size to avoid rehashing
+        final Map<Object, Integer> indexMap = new HashMap<>(values.size());
+        for (int i = 0; i < values.size(); i++) {
+            indexMap.put(values.get(i), i);
+        }
+        return Collections.unmodifiableMap(indexMap);
+    }
 
-            return Collections.unmodifiableMap(indexMap);
-        });
+    // -------------------------------------------------------------------------
+    // Guard predicates and state mutation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the given index falls outside the bounds of the values list.
+     *
+     * @param index  the index to check
+     * @param values the list to check against
+     * @return true if index is negative or >= values.size()
+     */
+    private static boolean isOutOfBounds(final int index, final List<?> values) {
+        return index < 0 || index >= values.size();
+    }
+
+    /**
+     * Applies the given value to the given property on the given state.
+     *
+     * <p>
+     * The unchecked cast is safe because {@code value} originates from
+     * {@code property.getValues()}, guaranteeing type compatibility.
+     * The {@code @SuppressWarnings} scope is intentionally kept to this
+     * single method to minimize the blast radius of the suppression.
+     *
+     * @param state    the block state to modify
+     * @param property the property to set
+     * @param value    the value to apply, sourced from the property's own value list
+     * @return a new BlockState with the property applied
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static BlockState applyPropertyValue(
+            final BlockState state,
+            final Property<?> property,
+            final Object value) {
+        return state.with((Property) property, (Comparable) value);
     }
 }

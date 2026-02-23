@@ -11,5 +11,5 @@ pluginManagement {
 
 rootProject.name = 'Chunkis'
 
-include 'core', 'cis-debugger'
+include 'core'
 include 'fabric'
