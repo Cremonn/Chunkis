@@ -14,34 +14,33 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Mixin for {@link RegionBasedStorage} to suppress vanilla MCA-based chunk storage.
+ * Suppresses all vanilla MCA region file I/O, routing chunk persistence
+ * exclusively through the Chunkis CIS delta system.
  *
- * <p>This mixin completely disables Minecraft's standard region file system (.mca files)
- * by intercepting and canceling all storage operations. This prevents conflicts between
- * the vanilla chunk storage system and Chunkis's delta-based CIS format.
- *
- * <p><b>Blocked Operations:</b>
+ * <p>
+ * The following operations are intercepted and cancelled at {@code HEAD}
+ * before any disk I/O occurs:
  * <ul>
- *   <li>Writing chunk NBT data to region files</li>
- *   <li>Reading chunk NBT data from region files</li>
- *   <li>Scanning chunks for data verification</li>
- *   <li>Synchronizing/flushing region file buffers</li>
+ * <li>{@code write} — chunk NBT writes to {@code .mca} files</li>
+ * <li>{@code getTagAt} — chunk NBT reads from {@code .mca} files; returns null,
+ *     signalling "chunk not in storage" so the load pipeline falls through to
+ *     {@code ThreadedAnvilChunkStorageMixin} which supplies CIS-backed NBT</li>
+ * <li>{@code scanChunk} — data migration / verification scans</li>
+ * <li>{@code sync} — region file buffer flushes</li>
  * </ul>
  *
- * <p><b>Important:</b> With this mixin active, all chunk persistence must be handled
- * by the Chunkis system. If Chunkis fails to save data, chunks will be regenerated
- * from worldgen on next load (player modifications will be lost).
+ * <p>
+ * <b>Important:</b> With this mixin active all chunk persistence is the
+ * responsibility of the Chunkis system. If Chunkis fails to save a chunk,
+ * player modifications will be lost on next load (the chunk regenerates from
+ * worldgen).
  *
- * <p><b>Performance Impact:</b> Minimal - operations are canceled at injection point
- * before any vanilla I/O occurs. This actually improves performance by eliminating
- * redundant disk writes.
- *
- * <p><b>Compatibility:</b> This mixin may conflict with other mods that rely on
- * vanilla region file storage. Such mods should either integrate with Chunkis or
- * be disabled.
+ * <p>
+ * <b>Compatibility:</b> May conflict with mods that rely on vanilla region file
+ * storage. Such mods must either integrate with Chunkis or be disabled.
  *
  * @author Liparakis
- * @version 2.0
+ * @version 2.1
  */
 @Mixin(RegionBasedStorage.class)
 public class StoragePreventionMixin {
@@ -49,105 +48,132 @@ public class StoragePreventionMixin {
     @Unique
     private static final Logger LOGGER = Chunkis.LOGGER;
 
+    // -------------------------------------------------------------------------
+    // Write suppression
+    // -------------------------------------------------------------------------
+
     /**
-     * Prevents writing chunk data to vanilla region files (.mca).
+     * Cancels vanilla chunk NBT writes to {@code .mca} region files.
      *
-     * <p>Cancels the write operation before any I/O occurs, ensuring chunks are
-     * only persisted through the Chunkis CIS format. This prevents data duplication
-     * and format conflicts between vanilla and Chunkis storage systems.
-     *
-     * <p><b>Side Effect:</b> Vanilla tools that read .mca files (e.g., NBT editors,
-     * region file viewers) will not see chunk data. Use Chunkis-compatible tools instead.
+     * <p>
+     * Prevents data duplication and format conflicts between vanilla and Chunkis
+     * storage. Note: vanilla tools that read {@code .mca} files (NBT editors,
+     * region viewers) will not see chunk data while this mixin is active.
      *
      * @param position the chunk position attempting to be written
-     * @param nbt      the NBT compound data (unused as operation is canceled)
-     * @param ci       callback info for canceling the operation
+     * @param nbt      the NBT data (discarded — operation is cancelled)
+     * @param ci       mixin callback used to cancel the operation
      */
     @Inject(
             method = "write(Lnet/minecraft/util/math/ChunkPos;Lnet/minecraft/nbt/NbtCompound;)V",
             at = @At("HEAD"),
-            cancellable = true
-    )
-    private void chunkis$blockWrite(ChunkPos position, NbtCompound nbt, CallbackInfo ci) {
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Blocking vanilla chunk write for {}", position);
-        }
+            cancellable = true)
+    private void chunkis$blockWrite(
+            final ChunkPos position,
+            final NbtCompound nbt,
+            final CallbackInfo ci) {
+
+        logTrace("Blocking vanilla chunk write for {}", position);
         ci.cancel();
     }
 
+    // -------------------------------------------------------------------------
+    // Read suppression
+    // -------------------------------------------------------------------------
+
     /**
-     * Prevents retrieving chunk NBT from vanilla region files.
+     * Cancels vanilla chunk NBT reads and returns null.
      *
-     * <p>Returns null immediately instead of attempting to read from .mca files.
-     * This forces Minecraft's chunk loading system to either use Chunkis-provided
-     * NBT (via ThreadedAnvilChunkStorageMixin) or generate the chunk from scratch.
-     *
-     * <p><b>Behavior:</b> Returning null tells Minecraft "this chunk doesn't exist
-     * in storage," triggering worldgen. The Chunkis system intercepts this and
-     * provides its own NBT with delta data before worldgen occurs.
+     * <p>
+     * Returning null signals to Minecraft's chunk loading pipeline that this chunk
+     * does not exist in vanilla storage, causing the pipeline to fall through to
+     * worldgen. {@code ThreadedAnvilChunkStorageMixin} intercepts that path and
+     * provides CIS-backed NBT instead.
      *
      * @param position the chunk position attempting to be read
-     * @param cir      callback containing the return value (set to null)
+     * @param cir      callback whose return value is set to null
      */
     @Inject(
             method = "getTagAt(Lnet/minecraft/util/math/ChunkPos;)Lnet/minecraft/nbt/NbtCompound;",
             at = @At("HEAD"),
-            cancellable = true
-    )
-    private void chunkis$blockGetTagAt(ChunkPos position, CallbackInfoReturnable<NbtCompound> cir) {
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Blocking vanilla chunk read for {}", position);
-        }
+            cancellable = true)
+    private void chunkis$blockGetTagAt(
+            final ChunkPos position,
+            final CallbackInfoReturnable<NbtCompound> cir) {
+
+        logTrace("Blocking vanilla chunk read for {}", position);
         cir.setReturnValue(null);
     }
 
+    // -------------------------------------------------------------------------
+    // Scan suppression
+    // -------------------------------------------------------------------------
+
     /**
-     * Prevents scanning chunks in vanilla region files.
+     * Cancels chunk scan operations used for data migration and validation.
      *
-     * <p>Chunk scanning is used by Minecraft for data migration, validation, and
-     * upgrade operations. Blocking it prevents vanilla systems from attempting to
-     * "fix" or "upgrade" chunks that don't exist in the region file format.
-     *
-     * <p><b>Note:</b> This may cause warnings in logs during world upgrades or
-     * when using /data commands, as Minecraft will be unable to scan chunk data.
+     * <p>
+     * Prevents vanilla systems from attempting to upgrade or validate chunks that
+     * do not exist in the region file format. May produce warnings during world
+     * upgrades or {@code /data} commands.
      *
      * @param position the chunk position attempting to be scanned
-     * @param scanner  the NBT scanner (unused as operation is canceled)
-     * @param ci       callback info for canceling the operation
+     * @param scanner  the NBT scanner (discarded — operation is cancelled)
+     * @param ci       mixin callback used to cancel the operation
      */
     @Inject(
             method = "scanChunk(Lnet/minecraft/util/math/ChunkPos;Lnet/minecraft/nbt/scanner/NbtScanner;)V",
             at = @At("HEAD"),
-            cancellable = true
-    )
-    private void chunkis$blockScanChunk(ChunkPos position, NbtScanner scanner, CallbackInfo ci) {
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Blocking vanilla chunk scan for {}", position);
-        }
+            cancellable = true)
+    private void chunkis$blockScanChunk(
+            final ChunkPos position,
+            final NbtScanner scanner,
+            final CallbackInfo ci) {
+
+        logTrace("Blocking vanilla chunk scan for {}", position);
         ci.cancel();
     }
 
+    // -------------------------------------------------------------------------
+    // Sync suppression
+    // -------------------------------------------------------------------------
+
     /**
-     * Prevents synchronization of vanilla region file storage.
+     * Cancels region file buffer sync operations.
      *
-     * <p>Sync operations flush buffered writes to disk and update metadata. Since
-     * all chunk data is handled by Chunkis, vanilla sync is unnecessary and would
-     * only waste I/O operations.
+     * <p>
+     * Since all chunk data is handled by Chunkis, vanilla sync operations would
+     * produce unnecessary disk I/O on empty or absent region files.
      *
-     * <p><b>Performance Benefit:</b> Prevents periodic disk flushes of empty region
-     * files, reducing unnecessary I/O overhead during gameplay.
-     *
-     * @param ci callback info for canceling the operation
+     * @param ci mixin callback used to cancel the operation
      */
     @Inject(
             method = "sync()V",
             at = @At("HEAD"),
-            cancellable = true
-    )
-    private void chunkis$blockSync(CallbackInfo ci) {
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Blocking vanilla storage sync");
-        }
+            cancellable = true)
+    private void chunkis$blockSync(final CallbackInfo ci) {
+        logTrace("Blocking vanilla storage sync", null);
         ci.cancel();
+    }
+
+    // -------------------------------------------------------------------------
+    // Logging helper
+    // -------------------------------------------------------------------------
+
+    /**
+     * Emits a TRACE-level log entry. No-ops when trace logging is disabled,
+     * avoiding string-formatting overhead on the hot path.
+     *
+     * @param message the log message pattern (one {@code {}} placeholder, or none)
+     * @param arg     a single argument to interpolate, or null for zero-argument messages
+     */
+    @Unique
+    private static void logTrace(final String message, final Object arg) {
+        if (!LOGGER.isTraceEnabled()) return;
+        if (arg != null) {
+            LOGGER.trace(message, arg);
+        } else {
+            LOGGER.trace(message);
+        }
     }
 }
