@@ -6,9 +6,7 @@ plugins {
 
 subprojects { subproject ->
     // These modules have their own build.gradle files, so we exclude them from the root build.gradle
-    if (subproject.name == 'cis-debugger' ||
-        subproject.name == 'fabric'
-    ) {
+    if (subproject.name == 'fabric') {
         return
     }
 
@@ -87,8 +85,8 @@ subprojects { subproject ->
 
         filesMatching("fabric.mod.json") {
             expand "version": project.version,
-                   "minecraft_version": minecraft_version,
-                   "loader_version": loader_version
+                    "minecraft_version": minecraft_version,
+                    "loader_version": loader_version
         }
     }
 }
