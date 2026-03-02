@@ -1,15 +1,5 @@
-pluginManagement {
-    repositories {
-        maven {
-            name = 'Fabric'
-            url = 'https://maven.fabricmc.net/'
-        }
-        maven { url 'https://packages.jetbrains.team/maven/p/ij/intellij-dependencies' }
-        gradlePluginPortal()
-    }
-}
-
 rootProject.name = 'Chunkis'
 
-include 'core'
-include 'fabric'
+includeBuild 'core'
+includeBuild 'fabric'
+includeBuild 'neoforge'

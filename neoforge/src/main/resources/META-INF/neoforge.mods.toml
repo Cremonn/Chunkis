@@ -1,0 +1,24 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+
+[[mods]]
+    modId = "chunkis"
+    version = "${file.jarVersion}"
+    displayName = "Chunkis"
+    description = "Chunkis is a mod that adds chunk saving and loading to Minecraft."
+    authors = "Liparakis"
+
+[[dependencies.chunkis]]
+    modId = "neoforge"
+    type = "required"
+    versionRange = "[21.0,)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.chunkis]]
+    modId = "minecraft"
+    type = "required"
+    versionRange = "[1.21,1.22)"
+    ordering = "NONE"
+    side = "BOTH"
