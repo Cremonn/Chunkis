@@ -1,0 +1,58 @@
+plugins {
+    id 'net.neoforged.moddev'
+    id 'maven-publish'
+}
+
+version = project.property('mod_version')
+group = project.property('maven_group')
+
+base {
+    archivesName = "${project.property('archives_base_name')}-neoforge"
+}
+
+neoForge {
+    version = project.property('neoforge_version')
+
+    runs {
+        client {
+            client()
+        }
+        server {
+            server()
+        }
+    }
+
+    mods {
+        chunkis {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'io.liparakis.chunkis:chunkis-core:2.1.0'
+    jarJar 'io.liparakis.chunkis:chunkis-core:[2.1.0,)'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            artifact jar
+        }
+    }
+}
