@@ -21,6 +21,7 @@ import net.minecraft.registry.Registries;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.state.property.Property;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.WorldSavePath;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
@@ -36,55 +37,38 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Thread-safe helper for managing {@link RegionChunkStorage} instances per
- * world
- * dimension.
+ * world dimension.
  *
  * <p>
  * Storage instances are created lazily and cached by {@link RegistryKey}.
- * Concurrent
- * access is handled by a combination of {@link ConcurrentHashMap#compute} (for
- * atomic create-or-replace on the storage map) and a per-wrapper
- * {@link ReadWriteLock} (for safe close while reads are in flight).
+ * Concurrent access is handled by a combination of
+ * {@link ConcurrentHashMap#compute} (for atomic create-or-replace on the
+ * storage map) and a per-wrapper {@link ReadWriteLock} (for safe close while
+ * reads are in flight).
  *
  * <p>
  * <b>Lifecycle:</b> Call {@link #getStorage(ServerWorld)} to obtain a storage
- * instance.
- * Call {@link #closeStorage(ServerWorld)} when a world unloads to release
- * resources and
- * prevent memory leaks.
+ * instance. Call {@link #closeStorage(ServerWorld)} when a world unloads to
+ * release resources and prevent memory leaks.
  *
  * <p>
  * <b>Thread safety:</b> All public methods are thread-safe.
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 public final class FabricRegionChunkStorageHelper {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(FabricRegionChunkStorageHelper.class);
-
-    // -------------------------------------------------------------------------
-    // Path constants
-    // -------------------------------------------------------------------------
-
     private static final String DIMENSIONS_DIR = "dimensions";
-    private static final String CHUNKIS_DIR = "chunkis";
-    private static final String REGIONS_DIR = "regions";
-    private static final String MAPPING_FILE = "global_ids.json";
-    private static final String OVERWORLD_ID = "overworld";
-
-    // -------------------------------------------------------------------------
-    // Shared adapter singletons — immutable, reused across all storage instances
-    // -------------------------------------------------------------------------
-
+    private static final String CHUNKIS_DIR    = "chunkis";
+    private static final String REGIONS_DIR    = "regions";
+    private static final String MAPPING_FILE   = "global_ids.json";
+    private static final String OVERWORLD_ID   = "overworld";
     private static final BlockRegistryAdapter<Block> REGISTRY_ADAPTER = new FabricBlockRegistryAdapter();
     private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER = new FabricBlockStateAdapter();
     private static final NbtAdapter<NbtCompound> NBT_ADAPTER = new FabricNbtAdapter();
     private static final BlockState DEFAULT_BLOCK_STATE = Blocks.AIR.getDefaultState();
-
-    // -------------------------------------------------------------------------
-    // Per-dimension caches
-    // -------------------------------------------------------------------------
 
     /**
      * Active storage wrappers keyed by dimension registry key.
@@ -100,22 +84,20 @@ public final class FabricRegionChunkStorageHelper {
     private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache = new ConcurrentHashMap<>();
 
     /**
-     * Shared global registry instance to assign IDs across all dimensions.
+     * Shared global registry instance, assigned IDs across all dimensions.
+     * Lazily initialized on first use via double-checked locking. DCL is
+     * required here (rather than the holder idiom) because initialization
+     * depends on the runtime server save path.
      */
-    private static volatile BlockStateRegistry<Block> GLOBAL_REGISTRY = null;
+    private static volatile BlockStateRegistry<Block> globalRegistry;
 
     private FabricRegionChunkStorageHelper() {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
-
     /**
      * Returns the {@link RegionChunkStorage} for the given world, creating and
-     * caching
-     * a new instance if one does not exist or has been closed.
+     * caching a new instance if one does not exist or has been closed.
      *
      * <p>
      * Fast path (volatile read on the wrapper's {@code open} flag) is lock-free.
@@ -133,16 +115,15 @@ public final class FabricRegionChunkStorageHelper {
 
         final RegistryKey<World> key = world.getRegistryKey();
 
-        // Fast path: wrapper present and open — avoid compute overhead
+        // Fast path: wrapper present and open — avoid compute overhead.
         final StorageWrapper existing = storageMap.get(key);
         if (existing != null && existing.isOpen()) {
             return existing.getStorage();
         }
 
-        // Slow path: atomic create-or-replace via compute
+        // Slow path: atomic create-or-replace via compute.
         return storageMap.compute(key, (k, current) -> {
-            if (current != null && current.isOpen())
-                return current;
+            if (current != null && current.isOpen()) return current;
             closeQuietly(current);
             return openStorageWrapper(world, k);
         }).getStorage();
@@ -165,8 +146,7 @@ public final class FabricRegionChunkStorageHelper {
         final StorageWrapper wrapper = storageMap.remove(key);
         pathCache.remove(key);
 
-        if (wrapper == null)
-            return;
+        if (wrapper == null) return;
 
         try {
             wrapper.close();
@@ -176,10 +156,6 @@ public final class FabricRegionChunkStorageHelper {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Storage creation
-    // -------------------------------------------------------------------------
-
     /**
      * Creates a new {@link StorageWrapper} for the given world, logging success.
      * Wraps any {@link Exception} in a {@link StorageInitializationException}.
@@ -187,8 +163,7 @@ public final class FabricRegionChunkStorageHelper {
      * @param world the server world
      * @param key   the dimension registry key (for logging)
      * @return a new open {@link StorageWrapper}
-     * @throws StorageInitializationException if the underlying storage cannot be
-     *                                        created
+     * @throws StorageInitializationException if the underlying storage cannot be created
      */
     private static StorageWrapper openStorageWrapper(
             final ServerWorld world,
@@ -205,8 +180,7 @@ public final class FabricRegionChunkStorageHelper {
     }
 
     /**
-     * Constructs a fully initialized {@link RegionChunkStorage} for the given
-     * world.
+     * Constructs a fully initialized {@link RegionChunkStorage} for the given world.
      *
      * <p>
      * A new {@link BlockStatePacker} is created per storage instance because it
@@ -214,47 +188,49 @@ public final class FabricRegionChunkStorageHelper {
      *
      * @param world the server world
      * @return a ready-to-use {@link RegionChunkStorage}
-     * @throws IOException if directory creation or mapping file initialization
-     *                     fails
+     * @throws IOException if directory creation or mapping file initialization fails
      */
     private static RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> buildStorage(
             final ServerWorld world) throws IOException {
 
         final Path storageDir = resolveAndCreateStorageDir(world);
         final BlockStatePacker<Block, BlockState> packer = new DefaultBlockStatePacker<>(STATE_ADAPTER);
-        final io.liparakis.chunkis.model.BlockStateRegistry<Block> registry = getOrCreateGlobalRegistry(world);
+        final BlockStateRegistry<Block> registry = getOrCreateGlobalRegistry(world);
         final BlockMapper<BlockState> mapping = new DefaultBlockMapper<>(registry, STATE_ADAPTER, packer);
 
         return new RegionChunkStorage<>(storageDir, mapping, STATE_ADAPTER, NBT_ADAPTER, DEFAULT_BLOCK_STATE);
     }
 
     /**
-     * Lazy-loads the global BlockStateRegistry on first chunk access.
+     * Returns the shared global {@link BlockStateRegistry}, initializing it on
+     * the first call via double-checked locking.
+     *
+     * <p>
+     * The holder idiom cannot be used here because initialization requires the
+     * runtime server save path, which is not available at class-load time.
+     *
+     * @param world the server world, used to resolve the save path on first init
+     * @return the global block state registry
+     * @throws IOException if the mapping file cannot be read or created
      */
-    private static BlockStateRegistry<Block> getOrCreateGlobalRegistry(ServerWorld world)
-            throws IOException {
-        BlockStateRegistry<Block> reg = GLOBAL_REGISTRY;
-        if (reg != null)
-            return reg;
+    private static BlockStateRegistry<Block> getOrCreateGlobalRegistry(final ServerWorld world) throws IOException {
+        BlockStateRegistry<Block> reg = globalRegistry;
+        if (reg != null) return reg;
+
         synchronized (FabricRegionChunkStorageHelper.class) {
-            reg = GLOBAL_REGISTRY;
+            reg = globalRegistry;
             if (reg == null) {
-                Path globalMappingFile = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT)
-                        .resolve(CHUNKIS_DIR).resolve(MAPPING_FILE);
-                Files.createDirectories(globalMappingFile.getParent());
-                GLOBAL_REGISTRY = reg = GlobalIdsPersistence.loadOrInitRegistry(
-                        globalMappingFile,
-                        Registries.BLOCK,
-                        REGISTRY_ADAPTER,
-                        Blocks.AIR);
+                final Path mappingFile = Objects.requireNonNull(world.getServer())
+                        .getSavePath(WorldSavePath.ROOT)
+                        .resolve(CHUNKIS_DIR)
+                        .resolve(MAPPING_FILE);
+                Files.createDirectories(mappingFile.getParent());
+                globalRegistry = reg = GlobalIdsPersistence.loadOrInitRegistry(
+                        mappingFile, Registries.BLOCK, REGISTRY_ADAPTER, Blocks.AIR);
             }
         }
         return reg;
     }
-
-    // -------------------------------------------------------------------------
-    // Path resolution
-    // -------------------------------------------------------------------------
 
     /**
      * Returns the storage directory for the given world, creating it on disk if
@@ -269,8 +245,7 @@ public final class FabricRegionChunkStorageHelper {
         final RegistryKey<World> key = world.getRegistryKey();
 
         final Path cached = pathCache.get(key);
-        if (cached != null)
-            return cached;
+        if (cached != null) return cached;
 
         final Path storageDir = computeStorageDirectory(world);
         Files.createDirectories(storageDir);
@@ -291,51 +266,32 @@ public final class FabricRegionChunkStorageHelper {
      * @return the computed (not yet created) directory path
      */
     private static Path computeStorageDirectory(final ServerWorld world) {
-        final String dimPath = world.getRegistryKey().getValue().getPath();
+        // Resolve the dimension identifier once to avoid repeated getValue() calls.
+        final Identifier dimId = world.getRegistryKey().getValue();
         Path baseDir = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT);
 
-        if (!isOverworld(dimPath)) {
-            final String namespace = world.getRegistryKey().getValue().getNamespace();
-            baseDir = baseDir.resolve(DIMENSIONS_DIR).resolve(namespace).resolve(dimPath);
+        if (!OVERWORLD_ID.equals(dimId.getPath())) {
+            baseDir = baseDir.resolve(DIMENSIONS_DIR).resolve(dimId.getNamespace()).resolve(dimId.getPath());
         }
 
         return baseDir.resolve(CHUNKIS_DIR).resolve(REGIONS_DIR);
     }
 
     /**
-     * Returns true if the given dimension path corresponds to the overworld.
-     *
-     * @param dimPath the dimension registry path (e.g., "overworld", "the_nether")
-     * @return true if dimPath equals {@value #OVERWORLD_ID}
-     */
-    private static boolean isOverworld(final String dimPath) {
-        return OVERWORLD_ID.equals(dimPath);
-    }
-
-    // -------------------------------------------------------------------------
-    // Lifecycle helpers
-    // -------------------------------------------------------------------------
-
-    /**
-     * Closes the given wrapper, suppressing any exception.
-     * Used during atomic replace in {@link #getStorage} to clean up a stale wrapper
-     * without aborting the compute lambda.
+     * Closes the given wrapper, suppressing any exception. Used during atomic
+     * replace in {@link #getStorage} to clean up a stale wrapper without
+     * aborting the compute lambda.
      *
      * @param wrapper the wrapper to close, may be null
      */
     private static void closeQuietly(final StorageWrapper wrapper) {
-        if (wrapper == null)
-            return;
+        if (wrapper == null) return;
         try {
             wrapper.close();
         } catch (final Exception e) {
             LOGGER.warn("Error closing stale Chunkis storage wrapper", e);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // StorageWrapper
-    // -------------------------------------------------------------------------
 
     /**
      * Wraps a {@link RegionChunkStorage} with lifecycle state tracking.
@@ -346,7 +302,7 @@ public final class FabricRegionChunkStorageHelper {
      * underlying storage.
      *
      * <p>
-     * {@code isOpen()} reads the volatile {@code open} flag without acquiring a
+     * {@link #isOpen()} reads the volatile {@code open} flag without acquiring a
      * lock, providing a fast pre-check before entering the read-locked path.
      */
     private static final class StorageWrapper {
@@ -374,8 +330,7 @@ public final class FabricRegionChunkStorageHelper {
         RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
             lock.readLock().lock();
             try {
-                if (!open)
-                    throw new IllegalStateException("Storage has been closed");
+                if (!open) throw new IllegalStateException("Storage has been closed");
                 return storage;
             } finally {
                 lock.readLock().unlock();
@@ -394,13 +349,12 @@ public final class FabricRegionChunkStorageHelper {
 
         /**
          * Closes the underlying storage under a write lock.
-         * Idempotent — subsequent calls after the first are ignored.
+         * Idempotent — subsequent calls after the first are no-ops.
          */
         void close() {
             lock.writeLock().lock();
             try {
-                if (!open)
-                    return;
+                if (!open) return;
                 storage.close();
                 open = false;
             } finally {
@@ -409,14 +363,9 @@ public final class FabricRegionChunkStorageHelper {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Exception type
-    // -------------------------------------------------------------------------
-
     /**
      * Thrown when a {@link RegionChunkStorage} instance cannot be created for a
-     * dimension.
-     * Wraps the underlying cause for full stack trace propagation.
+     * dimension. Wraps the underlying cause for full stack trace propagation.
      */
     public static final class StorageInitializationException extends RuntimeException {
 

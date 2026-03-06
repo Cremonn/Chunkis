@@ -12,25 +12,29 @@ import net.fabricmc.api.Environment;
  * <p>
  * Delegates all substantive work to focused handler classes:
  * <ul>
- * <li>{@link ClientDeltaNetworking} — packet receiver, decoder, and
- * visitor</li>
- * <li>{@link ClientDeltaMetrics} — performance counters and error
- * rate-limiting</li>
+ * <li>{@link ClientDeltaNetworking} — packet receiver, decoder, and visitor</li>
+ * <li>{@link ClientDeltaMetrics} — performance counters and error rate-limiting</li>
  * </ul>
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 @Environment(EnvType.CLIENT)
 public class ClientChunkisMod implements ClientModInitializer {
 
+    /**
+     * Initializes all client-side systems.
+     *
+     * <p>
+     * Registers the {@link ClientDeltaNetworking} packet handler, then logs
+     * a startup message that includes a metrics-enabled indicator when
+     * {@link ClientDeltaMetrics#ENABLED} is true.
+     */
     @Override
     public void onInitializeClient() {
-        Chunkis.LOGGER.info("Chunkis Client initializing...");
-
+        Chunkis.LOGGER.info("Chunkis client initializing...");
         ClientDeltaNetworking.register();
-
-        if (ClientDeltaMetrics.ENABLED) Chunkis.LOGGER.info("Chunkis Client initialized — metrics enabled.");
-        else Chunkis.LOGGER.info("Chunkis Client initialized.");
+        Chunkis.LOGGER.info("Chunkis client initialized{}.",
+                ClientDeltaMetrics.ENABLED ? " — metrics enabled" : "");
     }
 }

@@ -7,8 +7,8 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.RegistryWrapper;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 
 /**
@@ -28,32 +28,32 @@ import org.slf4j.Logger;
  * chunk world state and block entity data.
  *
  * @author Liparakis
- * @version 2.1
+ * @version 2.2
  */
 public final class ChunkBlockEntityCapture {
 
     private static final Logger LOGGER = Chunkis.LOGGER;
-
-    /**
-     * NBT key required by Minecraft's block entity deserializer.
-     */
     private static final String BLOCK_ENTITY_ID_KEY = "id";
 
     private ChunkBlockEntityCapture() {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
-
     /**
      * Captures a single block entity into the provided delta.
      *
      * <p>
-     * Skips removed entities, entities that produce null or empty NBT, and
-     * entities whose type has no registry entry. Converts the absolute block
-     * position to local chunk coordinates before storing.
+     * The registry ID is resolved <em>before</em> serialization so that
+     * unregistered types are rejected without paying the cost of
+     * {@link BlockEntity#createNbt}. This is the primary performance
+     * improvement over the previous two-method split, which resolved
+     * the ID a second time inside the fallback path.
+     *
+     * <p>
+     * Skips removed entities, entities with unregistered types, and
+     * entities that produce empty NBT after serialization.
+     * Converts the absolute block position to local chunk coordinates
+     * before storing.
      *
      * @param blockEntity     the entity to capture
      * @param registryManager the registry wrapper used for NBT serialization
@@ -66,110 +66,33 @@ public final class ChunkBlockEntityCapture {
 
         if (blockEntity.isRemoved()) return;
 
-        final NbtCompound nbt = trySerializeBlockEntity(blockEntity, registryManager);
-        if (isEmptyNbt(nbt)) return;
-
-        storeInDelta(blockEntity.getPos(), nbt, delta);
-    }
-
-    // -------------------------------------------------------------------------
-    // Serialization
-    // -------------------------------------------------------------------------
-
-    /**
-     * Serializes the given block entity to NBT, ensuring the required
-     * {@value #BLOCK_ENTITY_ID_KEY} field is present.
-     *
-     * <p>
-     * Returns null and logs a warning if the block entity's type has no registry
-     * entry — such entities cannot be deserialized on load and must not be saved.
-     *
-     * @param blockEntity     the entity to serialize
-     * @param registryManager the registry wrapper for serialization
-     * @return the populated NBT compound, or null if the type is unregistered
-     */
-    @Nullable
-    private static NbtCompound trySerializeBlockEntity(
-            final BlockEntity blockEntity,
-            final RegistryWrapper.WrapperLookup registryManager) {
+        // Resolve type ID before serialization — avoids wasting createNbt() on unregistered types.
+        final Identifier typeId = BlockEntityType.getId(blockEntity.getType());
+        if (typeId == null) {
+            LOGGER.warn("Block entity at {} has unregistered type: {}, skipping.",
+                    blockEntity.getPos(), blockEntity.getType());
+            return;
+        }
 
         final NbtCompound nbt = blockEntity.createNbt(registryManager);
 
+        // createNbt() injects the id key for all registered types in modern Fabric/Yarn,
+        // but we guard defensively here without an extra allocation: putString is idempotent
+        // and cheaper than a redundant registry lookup through a separate method.
         if (!nbt.contains(BLOCK_ENTITY_ID_KEY)) {
-            return injectBlockEntityId(blockEntity, nbt);
+            nbt.putString(BLOCK_ENTITY_ID_KEY, typeId.toString());
         }
 
-        return nbt;
-    }
+        if (nbt.isEmpty()) return;
 
-    /**
-     * Attempts to inject the registry ID string into an NBT compound that is
-     * missing the required {@value #BLOCK_ENTITY_ID_KEY} field.
-     *
-     * <p>
-     * Returns null and logs a warning if the block entity's type is not registered,
-     * since saving an unidentifiable entity would produce unloadable data.
-     *
-     * @param blockEntity the entity whose type ID to look up
-     * @param nbt         the NBT compound to populate
-     * @return the populated NBT compound, or null if the type is unregistered
-     */
-    @Nullable
-    private static NbtCompound injectBlockEntityId(
-            final BlockEntity blockEntity,
-            final NbtCompound nbt) {
-
-        final var typeId = BlockEntityType.getId(blockEntity.getType());
-
-        if (typeId == null) {
-            LOGGER.warn("Block entity at {} has unregistered type: {}",
-                    blockEntity.getPos(), blockEntity.getType());
-            return null;
-        }
-
-        nbt.putString(BLOCK_ENTITY_ID_KEY, typeId.toString());
-        return nbt;
-    }
-
-    // -------------------------------------------------------------------------
-    // Delta storage
-    // -------------------------------------------------------------------------
-
-    /**
-     * Stores the given NBT into the delta at local chunk coordinates derived
-     * from the given absolute world position.
-     *
-     * <p>
-     * Local X and Z are extracted via bitwise AND with {@link CisConstants#COORD_MASK},
-     * which is faster than modulo and correct for non-negative chunk coordinates.
-     *
-     * @param worldPos the absolute block position
-     * @param nbt      the serialized block entity NBT
-     * @param delta    the delta to store the entry in
-     */
-    private static void storeInDelta(
-            final BlockPos worldPos,
-            final NbtCompound nbt,
-            final ChunkDelta<?, NbtCompound> delta) {
-
+        // Extract position once to avoid repeated getPos() calls.
+        // Local X and Z are derived via bitwise AND with COORD_MASK,
+        // which is faster than modulo and correct for non-negative chunk coordinates.
+        final BlockPos worldPos = blockEntity.getPos();
         delta.addBlockEntityData(
                 worldPos.getX() & CisConstants.COORD_MASK,
                 worldPos.getY(),
                 worldPos.getZ() & CisConstants.COORD_MASK,
                 nbt);
-    }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
-
-    /**
-     * Returns true if the given NBT compound is null or contains no entries.
-     *
-     * @param nbt the compound to check, may be null
-     * @return true if there is nothing to save
-     */
-    private static boolean isEmptyNbt(@Nullable final NbtCompound nbt) {
-        return nbt == null || nbt.isEmpty();
     }
 }

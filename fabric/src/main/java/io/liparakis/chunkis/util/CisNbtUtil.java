@@ -18,48 +18,53 @@ import java.util.Objects;
  * ensuring that NBT compounds are not accessed concurrently.
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 public final class CisNbtUtil {
+    /**
+     * Root key under which all Chunkis data is nested in a chunk's NBT.
+     */
+    public static final String CHUNKIS_DATA_KEY = "ChunkisData";
 
-    // -------------------------------------------------------------------------
-    // NBT key constants — public for use by serialization/deserialization code
-    // -------------------------------------------------------------------------
+    /**
+     * Chunk status string indicating no terrain has been generated.
+     */
+    public static final String STATUS_EMPTY = "minecraft:empty";
 
-    /** Root key under which all Chunkis data is nested in a chunk's NBT. */
-    public static final String CHUNKIS_DATA_KEY  = "ChunkisData";
+    /**
+     * NBT key for the Minecraft data version integer.
+     */
+    public static final String DATA_VERSION_KEY = "DataVersion";
 
-    /** Chunk status string indicating no terrain has been generated. */
-    public static final String STATUS_EMPTY      = "minecraft:empty";
+    /**
+     * NBT key for the chunk generation status string.
+     */
+    public static final String STATUS_KEY = "Status";
 
-    /** NBT key for the Minecraft data version integer. */
-    public static final String DATA_VERSION_KEY  = "DataVersion";
+    /**
+     * NBT key for the chunk's X coordinate.
+     */
+    public static final String X_POS_KEY = "xPos";
 
-    /** NBT key for the chunk generation status string. */
-    public static final String STATUS_KEY        = "Status";
-
-    /** NBT key for the chunk's X coordinate. */
-    public static final String X_POS_KEY         = "xPos";
-
-    /** NBT key for the chunk's Z coordinate. */
-    public static final String Z_POS_KEY         = "zPos";
+    /**
+     * NBT key for the chunk's Z coordinate.
+     */
+    public static final String Z_POS_KEY = "zPos";
 
     /**
      * NBT key written inside {@value #CHUNKIS_DATA_KEY} to indicate that a
      * {@link ChunkDelta} exists for this chunk in the separate CIS storage.
      */
-    public static final String HAS_DELTA_KEY     = "HasDelta";
+    public static final String HAS_DELTA_KEY = "HasDelta";
 
-    /** NBT key for the entity type registry ID, required by Minecraft's entity deserializer. */
-    private static final String ENTITY_ID_KEY    = "id";
+    /**
+     * NBT key for the entity type registry ID, required by Minecraft's entity deserializer.
+     */
+    private static final String ENTITY_ID_KEY = "id";
 
     private CisNbtUtil() {
         throw new AssertionError("Utility class");
     }
-
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
 
     /**
      * Creates a minimal NBT compound for a chunk with the required base fields.
@@ -107,8 +112,10 @@ public final class CisNbtUtil {
 
         Objects.requireNonNull(root, "Root NBT compound cannot be null");
 
-        if (!hasDelta(delta)) return;
+        if (delta == null || delta.isEmpty()) return;
 
+        // Allocate the inner compound only when a delta actually exists,
+        // avoiding an NbtCompound allocation on every unmodified chunk save.
         final NbtCompound chunkisData = new NbtCompound();
         chunkisData.putBoolean(HAS_DELTA_KEY, true);
         root.put(CHUNKIS_DATA_KEY, chunkisData);
@@ -123,36 +130,17 @@ public final class CisNbtUtil {
      * Some serialization paths omit this field; this method inserts it from the
      * entity's type registry entry if it is absent.
      *
+     * <p>
+     * The registry lookup and {@link Object#toString()} call are deferred behind the
+     * {@code contains} guard, so no allocation occurs on the common path where the
+     * field is already present.
+     *
      * @param nbt    the entity NBT compound to check and potentially update
      * @param entity the entity whose type registry ID should be inserted if missing
      */
     public static void ensureEntityIdPresent(final NbtCompound nbt, final Entity entity) {
         if (!nbt.contains(ENTITY_ID_KEY)) {
-            nbt.putString(ENTITY_ID_KEY, resolveEntityId(entity));
+            nbt.putString(ENTITY_ID_KEY, Registries.ENTITY_TYPE.getId(entity.getType()).toString());
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates and helpers
-    // -------------------------------------------------------------------------
-
-    /**
-     * Returns true if the given delta is non-null and contains at least one change.
-     *
-     * @param delta the delta to evaluate, may be null
-     * @return true if a marker should be written into the chunk NBT
-     */
-    private static boolean hasDelta(final ChunkDelta<?, ?> delta) {
-        return delta != null && !delta.isEmpty();
-    }
-
-    /**
-     * Resolves the registry ID string for the given entity's type.
-     *
-     * @param entity the entity whose type to look up
-     * @return the registry ID string (e.g., {@code "minecraft:pig"})
-     */
-    private static String resolveEntityId(final Entity entity) {
-        return Registries.ENTITY_TYPE.getId(entity.getType()).toString();
     }
 }

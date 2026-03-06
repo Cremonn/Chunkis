@@ -26,21 +26,19 @@ import net.minecraft.state.property.Property;
  *
  * <p>
  * <b>Creation strategy:</b> Encoder and decoder singletons are lazily initialized
- * on first use via double-checked locking. This provides zero-allocation performance
- * on the hot path while deferring construction until the codec is actually needed.
+ * via the initialization-on-demand holder idiom. The JVM guarantees that the holder
+ * class is loaded and its static fields initialized exactly once, on the first call
+ * to {@link #createDecoder()} or {@link #createEncoder()} respectively. This is
+ * allocation-free on the hot path and requires no {@code volatile} fields or
+ * {@code synchronized} blocks.
  *
  * <p>
  * <b>Thread safety:</b> All public methods are thread-safe.
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 public final class FabricNetworkCodecFactory {
-
-    // -------------------------------------------------------------------------
-    // Shared adapter singletons — immutable and thread-safe
-    // -------------------------------------------------------------------------
-
     private static final BlockRegistryAdapter<Block> REGISTRY_ADAPTER = new FabricBlockRegistryAdapter();
     private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER = new FabricBlockStateAdapter();
     private static final NbtAdapter<NbtCompound> NBT_ADAPTER = new FabricNbtAdapter();
@@ -51,119 +49,63 @@ public final class FabricNetworkCodecFactory {
      */
     private static final BlockState AIR_STATE = Blocks.AIR.getDefaultState();
 
-    // -------------------------------------------------------------------------
-    // Lazy-initialized codec singletons (double-checked locking)
-    // -------------------------------------------------------------------------
-
-    /**
-     * Volatile reference to the shared decoder singleton. Null until first use.
-     * Guarded by {@code synchronized (FabricNetworkCodecFactory.class)} on the slow path.
-     */
-    private static volatile CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> decoderSingleton;
-
-    /**
-     * Volatile reference to the shared encoder singleton. Null until first use.
-     * Guarded by {@code synchronized (FabricNetworkCodecFactory.class)} on the slow path.
-     */
-    private static volatile CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> encoderSingleton;
-
     private FabricNetworkCodecFactory() {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Public API — singleton access (preferred for stateless codecs)
-    // -------------------------------------------------------------------------
-
     /**
-     * Returns the shared decoder singleton, creating it on first call.
+     * Returns the shared decoder singleton, creating it on the first call.
      *
      * <p>
-     * Uses double-checked locking: the fast path (volatile read) is allocation-free.
-     * The slow path (synchronized block) is taken only on the very first call.
+     * Thread safety is guaranteed by the JVM class-loading contract: the
+     * {@link DecoderHolder} class is initialized exactly once, the first time
+     * this method is invoked. No {@code volatile} read or {@code synchronized}
+     * block is needed on subsequent calls.
      *
      * @return the shared {@link CisNetworkDecoder} instance
      */
     public static CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> createDecoder() {
-        final CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> fast = decoderSingleton;
-        if (fast != null) return fast;
-        return initDecoderSingleton();
+        return DecoderHolder.INSTANCE;
     }
 
     /**
-     * Returns the shared encoder singleton, creating it on first call.
+     * Returns the shared encoder singleton, creating it on the first call.
      *
      * <p>
-     * Uses double-checked locking: the fast path (volatile read) is allocation-free.
-     * The slow path (synchronized block) is taken only on the very first call.
+     * Thread safety is guaranteed by the JVM class-loading contract: the
+     * {@link EncoderHolder} class is initialized exactly once, the first time
+     * this method is invoked. No {@code volatile} read or {@code synchronized}
+     * block is needed on subsequent calls.
      *
      * @return the shared {@link CisNetworkEncoder} instance
      */
     public static CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> createEncoder() {
-        final CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> fast = encoderSingleton;
-        if (fast != null) return fast;
-        return initEncoderSingleton();
-    }
-
-    // -------------------------------------------------------------------------
-    // Singleton initialization (slow path)
-    // -------------------------------------------------------------------------
-
-    /**
-     * Synchronized slow path for decoder singleton initialization.
-     * Re-checks the volatile field inside the lock to handle concurrent first callers.
-     *
-     * @return the initialized decoder singleton
-     */
-    private static synchronized CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> initDecoderSingleton() {
-        if (decoderSingleton == null) {
-            decoderSingleton = buildDecoder();
-        }
-        return decoderSingleton;
+        return EncoderHolder.INSTANCE;
     }
 
     /**
-     * Synchronized slow path for encoder singleton initialization.
-     * Re-checks the volatile field inside the lock to handle concurrent first callers.
+     * Holder for the {@link CisNetworkDecoder} singleton.
      *
-     * @return the initialized encoder singleton
+     * <p>
+     * The JVM loads and initializes this class at most once, on the first
+     * access to {@link #INSTANCE}, providing lazy initialization without
+     * any explicit synchronization overhead.
      */
-    private static synchronized CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> initEncoderSingleton() {
-        if (encoderSingleton == null) {
-            encoderSingleton = buildEncoder();
-        }
-        return encoderSingleton;
-    }
-
-    // -------------------------------------------------------------------------
-    // Instance construction
-    // -------------------------------------------------------------------------
-
-    /**
-     * Constructs a new {@link CisNetworkDecoder} wired to the shared adapter singletons.
-     *
-     * @return a fully initialized decoder
-     */
-    private static CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> buildDecoder() {
-        return new CisNetworkDecoder<>(
-                REGISTRY_ADAPTER,
-                PROPERTY_PACKER,
-                STATE_ADAPTER,
-                NBT_ADAPTER,
-                AIR_STATE);
+    private static final class DecoderHolder {
+        static final CisNetworkDecoder<Block, BlockState, Property<?>, NbtCompound> INSTANCE =
+                new CisNetworkDecoder<>(REGISTRY_ADAPTER, PROPERTY_PACKER, STATE_ADAPTER, NBT_ADAPTER, AIR_STATE);
     }
 
     /**
-     * Constructs a new {@link CisNetworkEncoder} wired to the shared adapter singletons.
+     * Holder for the {@link CisNetworkEncoder} singleton.
      *
-     * @return a fully initialized encoder
+     * <p>
+     * The JVM loads and initializes this class at most once, on the first
+     * access to {@link #INSTANCE}, providing lazy initialization without
+     * any explicit synchronization overhead.
      */
-    private static CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> buildEncoder() {
-        return new CisNetworkEncoder<>(
-                REGISTRY_ADAPTER,
-                PROPERTY_PACKER,
-                STATE_ADAPTER,
-                NBT_ADAPTER,
-                AIR_STATE);
+    private static final class EncoderHolder {
+        static final CisNetworkEncoder<Block, BlockState, Property<?>, NbtCompound> INSTANCE =
+                new CisNetworkEncoder<>(REGISTRY_ADAPTER, PROPERTY_PACKER, STATE_ADAPTER, NBT_ADAPTER, AIR_STATE);
     }
 }

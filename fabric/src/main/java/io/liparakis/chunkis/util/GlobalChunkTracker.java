@@ -18,34 +18,27 @@ import java.util.stream.Collectors;
  * Maintains two complementary stores:
  * <ul>
  * <li><b>Dirty delta map:</b> Strong references to deltas for all actively
- * dirty chunks.
- * Entries are removed via {@link #markSaved(ChunkPos)} after a successful disk
- * write.</li>
+ * dirty chunks. Entries are removed via {@link #markSaved(ChunkPos)} after a
+ * successful disk write.</li>
  * <li><b>Unload cache:</b> Size-limited LRU cache ({@value #MAX_CACHE_SIZE}
- * entries) that
- * retains recently unloaded deltas as a safety net for the critical
- * unload-reload gap
- * during player disconnects. LRU eviction prevents unbounded memory
- * growth.</li>
+ * entries) that retains recently unloaded deltas as a safety net for the
+ * critical unload-reload gap during player disconnects. LRU eviction prevents
+ * unbounded memory growth.</li>
  * </ul>
  *
  * <p>
  * <b>Thread safety:</b> The dirty delta map uses {@link ConcurrentHashMap} for
- * lock-free
- * concurrent access. The unload cache uses a synchronized {@link LinkedHashMap}
- * because
- * {@link LinkedHashMap} is not thread-safe and requires external locking to
- * maintain its
- * access-order invariant correctly.
+ * lock-free concurrent access. The unload cache uses a synchronized
+ * {@link LinkedHashMap} because {@link LinkedHashMap} is not thread-safe and
+ * requires external locking to maintain its access-order invariant correctly.
  *
  * <p>
  * Chunk references passed into this class are never retained — only the
  * {@link ChunkDelta} extracted from the duck interface and the {@code long}
- * chunk key
- * are stored.
+ * chunk key are stored.
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 public final class GlobalChunkTracker {
 
@@ -96,12 +89,10 @@ public final class GlobalChunkTracker {
      * @param chunk the chunk whose delta should be tracked
      */
     public static void markDirty(final WorldChunk chunk) {
-        if (!isChunkisDuck(chunk))
-            return;
+        if (!(chunk instanceof ChunkisDeltaDuck duck)) return;
 
-        final ChunkDelta<?, ?> delta = asDuck(chunk).chunkis$getDelta();
-        if (isDeltaAbsent(delta))
-            return;
+        final ChunkDelta<?, ?> delta = duck.chunkis$getDelta();
+        if (delta == null || delta.isEmpty()) return;
 
         putDelta(chunk.getPos().toLong(), delta);
     }
@@ -133,19 +124,16 @@ public final class GlobalChunkTracker {
      */
     public static void markSaved(final ChunkPos position) {
         dirtyDeltas.remove(position.toLong());
-        // Intentionally NOT removed from unloadCache — safety net for shutdown
-        // re-saves.
+        // Intentionally NOT removed from unloadCache — safety net for shutdown re-saves.
     }
 
     /**
-     * Clears all tracked deltas from both the active dirty map and the unload
-     * cache.
+     * Clears all tracked deltas from both the active dirty map and the unload cache.
      *
      * <p>
      * Call this when the server stops or when a client disconnects from a
-     * singleplayer
-     * world to prevent memory leaks, as static collections will otherwise retain
-     * up to {@value #MAX_CACHE_SIZE} deltas indefinitely.
+     * singleplayer world to prevent memory leaks, as static collections will
+     * otherwise retain up to {@value #MAX_CACHE_SIZE} deltas indefinitely.
      */
     public static void clear() {
         dirtyDeltas.clear();
@@ -153,10 +141,6 @@ public final class GlobalChunkTracker {
             unloadCache.clear();
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Read operations
-    // -------------------------------------------------------------------------
 
     /**
      * Retrieves a tracked delta by chunk position.
@@ -172,15 +156,19 @@ public final class GlobalChunkTracker {
         final long chunkKey = position.toLong();
 
         final ChunkDelta<?, ?> active = dirtyDeltas.get(chunkKey);
-        if (active != null)
-            return active;
+        if (active != null) return active;
 
-        return getFromUnloadCache(chunkKey);
+        synchronized (unloadCache) {
+            return unloadCache.get(chunkKey);
+        }
     }
 
     /**
      * Returns an unmodifiable snapshot of all chunk positions with pending dirty
      * deltas.
+     *
+     * <p>
+     * Allocates a stream and intermediate set on each call.
      *
      * @return set of chunk positions awaiting persistence
      */
@@ -190,78 +178,18 @@ public final class GlobalChunkTracker {
                 .collect(Collectors.toUnmodifiableSet());
     }
 
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
-
     /**
-     * Puts the given delta into both the dirty map and the unload cache.
-     * Centralizes the dual-write so neither store is accidentally omitted.
+     * Puts the given delta into both the dirty map and the unload cache under
+     * the cache's own lock. Centralizes the dual-write so neither store is
+     * accidentally omitted.
      *
      * @param chunkKey the packed chunk position key
      * @param delta    the delta to store
      */
     private static void putDelta(final long chunkKey, final ChunkDelta<?, ?> delta) {
         dirtyDeltas.put(chunkKey, delta);
-        putInUnloadCache(chunkKey, delta);
-    }
-
-    /**
-     * Inserts the given entry into the unload cache under the cache's own lock.
-     *
-     * @param chunkKey the packed chunk position key
-     * @param delta    the delta to cache
-     */
-    private static void putInUnloadCache(final long chunkKey, final ChunkDelta<?, ?> delta) {
         synchronized (unloadCache) {
             unloadCache.put(chunkKey, delta);
         }
-    }
-
-    /**
-     * Retrieves an entry from the unload cache under the cache's own lock.
-     *
-     * @param chunkKey the packed chunk position key
-     * @return the cached delta, or null if not present
-     */
-    private static ChunkDelta<?, ?> getFromUnloadCache(final long chunkKey) {
-        synchronized (unloadCache) {
-            return unloadCache.get(chunkKey);
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
-
-    /**
-     * Returns true if the given chunk implements {@link ChunkisDeltaDuck}.
-     *
-     * @param chunk the chunk to test
-     * @return true if the chunk can carry a delta
-     */
-    private static boolean isChunkisDuck(final WorldChunk chunk) {
-        return chunk instanceof ChunkisDeltaDuck;
-    }
-
-    /**
-     * Casts the given chunk to {@link ChunkisDeltaDuck}.
-     * Only call after confirming {@link #isChunkisDuck(WorldChunk)} returns true.
-     *
-     * @param chunk the chunk to cast
-     * @return the chunk as a ChunkisDeltaDuck
-     */
-    private static ChunkisDeltaDuck asDuck(final WorldChunk chunk) {
-        return (ChunkisDeltaDuck) chunk;
-    }
-
-    /**
-     * Returns true if the given delta is null or contains no changes.
-     *
-     * @param delta the delta to evaluate, may be null
-     * @return true if the delta should be skipped
-     */
-    private static boolean isDeltaAbsent(final ChunkDelta<?, ?> delta) {
-        return delta == null || delta.isEmpty();
     }
 }
