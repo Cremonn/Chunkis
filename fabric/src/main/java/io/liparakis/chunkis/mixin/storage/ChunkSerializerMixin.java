@@ -1,9 +1,9 @@
 package io.liparakis.chunkis.mixin.storage;
 
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.util.FabricRegionChunkStorageHelper;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.ChunkPos;
@@ -142,7 +142,7 @@ public class ChunkSerializerMixin {
     @Unique
     @SuppressWarnings("rawtypes")
     private static ChunkDelta loadDeltaFromDisk(final ChunkPos pos, final ServerWorld world) {
-        return FabricCisStorageHelper.getStorage(world).load(new CisChunkPos(pos.x, pos.z));
+        return FabricRegionChunkStorageHelper.getStorage(world).load(new CisChunkPos(pos.x, pos.z));
     }
 
     // -------------------------------------------------------------------------
@@ -157,7 +157,7 @@ public class ChunkSerializerMixin {
      * @param delta the delta to attach
      */
     @Unique
-    @SuppressWarnings({ "rawtypes" })
+    @SuppressWarnings({"rawtypes"})
     private static void attachDeltaToChunk(final ProtoChunk chunk, final ChunkDelta delta) {
         if (chunk instanceof ChunkisDeltaDuck deltaDuck) {
             deltaDuck.chunkis$setDelta(delta);

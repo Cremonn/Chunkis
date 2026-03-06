@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.entity;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.util.CisNbtUtil;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.block.BlockState;
@@ -64,6 +64,7 @@ public abstract class EntityMixin {
         if (!(world instanceof ServerWorld serverWorld))
             return false;
 
+        assert serverWorld.getServer() != null;
         if (serverWorld.getServer().getThread() != Thread.currentThread())
             return false;
 

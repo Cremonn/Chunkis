@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.WorldChunk;
 

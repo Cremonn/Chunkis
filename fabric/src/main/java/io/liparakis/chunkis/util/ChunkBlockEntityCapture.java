@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.storage.CisConstants;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;
@@ -34,7 +34,9 @@ public final class ChunkBlockEntityCapture {
 
     private static final Logger LOGGER = Chunkis.LOGGER;
 
-    /** NBT key required by Minecraft's block entity deserializer. */
+    /**
+     * NBT key required by Minecraft's block entity deserializer.
+     */
     private static final String BLOCK_ENTITY_ID_KEY = "id";
 
     private ChunkBlockEntityCapture() {

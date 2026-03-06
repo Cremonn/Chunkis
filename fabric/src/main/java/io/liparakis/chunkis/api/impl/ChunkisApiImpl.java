@@ -1,10 +1,11 @@
 package io.liparakis.chunkis.api.impl;
 
+import io.liparakis.chunkis.storage.RegionChunkStorage;
+
 import io.liparakis.chunkis.api.ChunkisApi;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.util.FabricRegionChunkStorageHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
@@ -52,8 +53,8 @@ public final class ChunkisApiImpl implements ChunkisApi {
      * {@inheritDoc}
      */
     @Override
-    public CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
-        return FabricCisStorageHelper.getStorage(world);
+    public RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
+        return FabricRegionChunkStorageHelper.getStorage(world);
     }
 
     /**

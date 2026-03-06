@@ -1,4 +1,4 @@
-package io.liparakis.chunkis.core;
+package io.liparakis.chunkis.model;
 
 import io.liparakis.chunkis.storage.CisConstants;
 

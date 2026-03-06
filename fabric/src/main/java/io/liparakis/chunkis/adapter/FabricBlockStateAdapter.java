@@ -31,10 +31,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
     private static final List<Property<?>> EMPTY_PROPERTIES = Collections.emptyList();
     private static final List<Object>      EMPTY_VALUES      = Collections.emptyList();
 
-    // Stable comparator instance: string-based for deterministic, cross-type ordering
-    // across enums, integers, and booleans.
-    private static final Comparator<Object> VALUE_COMPARATOR = Comparator.comparing(Object::toString);
-
     // Caches for immutable block metadata — safe to retain indefinitely since
     // block properties and their values are fixed at registration time.
     private final Map<Block,       List<Property<?>>>     blockPropertiesCache = new ConcurrentHashMap<>(256);
@@ -239,20 +235,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
     public boolean isAir(final BlockState state) {
         Objects.requireNonNull(state, "BlockState cannot be null");
         return state.isAir();
-    }
-
-    /**
-     * Returns a comparator for property values.
-     *
-     * <p>
-     * Uses string representation for deterministic, stable sorting across
-     * different property value types (enums, integers, booleans).
-     *
-     * @return comparator based on string representation
-     */
-    @Override
-    public Comparator<Object> getValueComparator() {
-        return VALUE_COMPARATOR;
     }
 
     // -------------------------------------------------------------------------

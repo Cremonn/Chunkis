@@ -1,4 +1,4 @@
-package io.liparakis.chunkis.core;
+package io.liparakis.chunkis.model;
 
 import java.util.ArrayList;
 import java.util.HashMap;

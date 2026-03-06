@@ -1,9 +1,9 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.storage.CisStorage;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.storage.RegionChunkStorage;
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtIo;
@@ -82,7 +82,7 @@ public final class McaMigrator {
         // Parallel migration is safe: RegionFile.read/write are synchronized,
         // the region-file cache is guarded by a ReadWriteLock, CisMapping uses
         // RW-locking internally, and compression state is ThreadLocal.
-        CisStorage<?, ?, ?, ?> storage = FabricCisStorageHelper.getStorage(world);
+        RegionChunkStorage<?, ?, ?, ?> storage = FabricRegionChunkStorageHelper.getStorage(world);
         AtomicInteger totalMigrated = new AtomicInteger();
         ExecutorService executor = Executors.newFixedThreadPool(MIGRATION_THREADS);
 
@@ -121,7 +121,7 @@ public final class McaMigrator {
      * {@code ROOT}; we only need to append {@code region/}.
      */
     private static Path resolveMcaRegionDir(ServerWorld world) {
-        Path root = world.getServer().getSavePath(WorldSavePath.ROOT);
+        Path root = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT);
         String namespace = world.getRegistryKey().getValue().getNamespace();
         String dimPath = world.getRegistryKey().getValue().getPath();
 
@@ -136,7 +136,7 @@ public final class McaMigrator {
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static int migrateRegionFile(
             ServerWorld world,
-            CisStorage storage, // raw type contained to this method
+            RegionChunkStorage storage, // raw type contained to this method
             Path mcaPath,
             int rx, int rz) {
 

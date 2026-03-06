@@ -1,4 +1,6 @@
-package io.liparakis.chunkis.storage;
+package io.liparakis.chunkis.model;
+
+import io.liparakis.chunkis.storage.CisConstants;
 
 import java.util.Arrays;
 

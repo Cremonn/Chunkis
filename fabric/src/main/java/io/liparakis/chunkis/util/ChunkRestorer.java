@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;

@@ -1,11 +1,12 @@
-package io.liparakis.chunkis.storage.codec;
+package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.core.BlockInstruction;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.Palette;
+import io.liparakis.chunkis.model.BlockInstruction;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.Palette;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.BitUtils.BitReader;
+import io.liparakis.chunkis.codec.interfaces.BitReader;
+import io.liparakis.chunkis.codec.ArrayBitReader;
 import io.liparakis.chunkis.storage.CisConstants;
 
 import java.io.ByteArrayInputStream;
@@ -65,8 +66,8 @@ public abstract class AbstractCisDecoder<S, N> {
         this.stateAdapter = stateAdapter;
         this.nbtAdapter = nbtAdapter;
         this.airState = airState;
-        this.propertyReader = new BitReader(new byte[0]);
-        this.sectionReader = new BitReader(new byte[0]);
+        this.propertyReader = new ArrayBitReader(new byte[0]);
+        this.sectionReader = new ArrayBitReader(new byte[0]);
         this.localPaletteBuffer = new int[SECTION_VOLUME];
     }
 

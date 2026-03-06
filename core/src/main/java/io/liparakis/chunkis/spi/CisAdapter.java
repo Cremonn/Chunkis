@@ -1,7 +1,7 @@
-package io.liparakis.chunkis.storage;
+package io.liparakis.chunkis.spi;
 
-import io.liparakis.chunkis.storage.BitUtils.BitReader;
-import io.liparakis.chunkis.storage.BitUtils.BitWriter;
+import io.liparakis.chunkis.codec.interfaces.BitReader;
+import io.liparakis.chunkis.codec.interfaces.BitWriter;
 
 import java.io.IOException;
 

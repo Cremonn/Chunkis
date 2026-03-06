@@ -1,11 +1,10 @@
-package io.liparakis.chunkis.storage.codec;
+package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.PropertyPacker;
-
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.List;
@@ -31,27 +30,22 @@ public final class CisNetworkEncoder<B, S, P, N> extends AbstractCisEncoder<S, N
     private static final ThreadLocal<EncoderContext> CONTEXT = ThreadLocal.withInitial(EncoderContext::new);
 
     private final BlockRegistryAdapter<B> registryAdapter;
-    private final PropertyPacker<B, S, P> propertyPacker;
-    // We also need access to block from state, which stateAdapter provides.
-    // AbstractCisEncoder has protected stateAdapter, but we need it cast to <B,S,P>
-    // or use getter?
-    // Actually propertyPacker might handle packing if we give it state?
-    // Let's check PropertyPacker API.
-    // It has pack(S state, BitWriter writer).
-    // So we don't need to manually get properties or block.
+    private final BlockStatePacker<B, S> propertyPacker;
+    private final BlockStateAdapter<B, S, P> typedStateAdapter;
 
     /**
      * Constructs a new CisNetworkEncoder.
      */
     public CisNetworkEncoder(
             BlockRegistryAdapter<B> registryAdapter,
-            PropertyPacker<B, S, P> propertyPacker,
+            BlockStatePacker<B, S> propertyPacker,
             BlockStateAdapter<B, S, P> stateAdapter,
             NbtAdapter<N> nbtAdapter,
             S airState) {
         super(stateAdapter, nbtAdapter, airState);
         this.registryAdapter = registryAdapter;
         this.propertyPacker = propertyPacker;
+        this.typedStateAdapter = stateAdapter;
     }
 
     /**
@@ -75,7 +69,7 @@ public final class CisNetworkEncoder<B, S, P, N> extends AbstractCisEncoder<S, N
             S state = usedStates.get(i);
 
             // Write block identifier as string
-            B block = ((BlockStateAdapter<B, S, P>) stateAdapter).getBlock(state);
+            B block = typedStateAdapter.getBlock(state);
             String blockId = registryAdapter.getId(block);
             dos.writeUTF(blockId);
 

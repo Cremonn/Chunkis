@@ -1,4 +1,7 @@
-package io.liparakis.chunkis.storage;
+package io.liparakis.chunkis.codec;
+
+import io.liparakis.chunkis.codec.interfaces.Compressor;
+import io.liparakis.chunkis.storage.CisConstants;
 
 import java.io.ByteArrayOutputStream;
 import java.util.zip.Deflater;
@@ -7,7 +10,7 @@ import java.util.zip.Inflater;
 /**
  * Thread-local compression context to avoid allocations and synchronization.
  */
-final class CompressionContext {
+public final class ZlibCompressor implements Compressor {
     private static final int COMPRESSION_BUFFER_SIZE = 8192;
 
     private final Deflater deflater;
@@ -15,12 +18,12 @@ final class CompressionContext {
     private final byte[] buffer = new byte[COMPRESSION_BUFFER_SIZE];
     private final ByteArrayOutputStream outputStream = new ByteArrayOutputStream(COMPRESSION_BUFFER_SIZE);
 
-    CompressionContext() {
+    public ZlibCompressor() {
         this(new Deflater(CisConstants.COMPRESSION_LEVEL), new Inflater());
     }
 
     // Visible for testing
-    CompressionContext(Deflater deflater, Inflater inflater) {
+    ZlibCompressor(Deflater deflater, Inflater inflater) {
         this.deflater = deflater;
         this.inflater = inflater;
     }
@@ -31,7 +34,7 @@ final class CompressionContext {
      * @param data the raw data
      * @return the compressed data
      */
-    byte[] compress(byte[] data) {
+    public byte[] compress(byte[] data) {
         deflater.reset();
         deflater.setInput(data);
         deflater.finish();
@@ -52,7 +55,7 @@ final class CompressionContext {
      * @return the raw data
      * @throws Exception if inflation fails
      */
-    byte[] decompress(byte[] data) throws Exception {
+    public byte[] decompress(byte[] data) throws Exception {
         inflater.reset();
         inflater.setInput(data);
         outputStream.reset();

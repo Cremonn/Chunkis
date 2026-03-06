@@ -1,11 +1,14 @@
 package io.liparakis.chunkis.storage;
 
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
+import io.liparakis.chunkis.codec.interfaces.BlockMapper;
+import io.liparakis.chunkis.codec.interfaces.Compressor;
+import io.liparakis.chunkis.codec.ZlibCompressor;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.CisChunkPos;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.codec.CisDecoder;
-import io.liparakis.chunkis.storage.codec.CisEncoder;
+import io.liparakis.chunkis.codec.stream.CisDecoder;
+import io.liparakis.chunkis.codec.stream.CisEncoder;
 import it.unimi.dsi.fastutil.objects.Object2ObjectLinkedOpenHashMap;
 
 import java.io.IOException;
@@ -28,7 +31,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @param <P> Property type
  * @param <N> NBT type
  */
-public final class CisStorage<B, S, P, N> {
+public final class RegionChunkStorage<B, S, P, N> implements ChunkStorage<S, N> {
     private static final int REGION_SHIFT = 5;
 
     /**
@@ -39,7 +42,7 @@ public final class CisStorage<B, S, P, N> {
     /**
      * The global block mapping used for this storage instance.
      */
-    private final CisMapping<B, S, P> mapping;
+    private final BlockMapper<S> mapping;
     private final BlockStateAdapter<B, S, P> stateAdapter;
     private final NbtAdapter<N> nbtAdapter;
     private final S airState;
@@ -58,13 +61,13 @@ public final class CisStorage<B, S, P, N> {
      * Thread-local compression state to allow concurrent save/load without
      * re-allocation.
      */
-    private final ThreadLocal<CompressionContext> compressionContext = ThreadLocal.withInitial(CompressionContext::new);
+    private final ThreadLocal<Compressor> compressionContext = ThreadLocal.withInitial(ZlibCompressor::new);
 
     /**
      * Creates a new CisStorage instance.
      */
-    public CisStorage(Path storageDir, CisMapping<B, S, P> mapping, BlockStateAdapter<B, S, P> stateAdapter,
-            NbtAdapter<N> nbtAdapter, S airState) {
+    public RegionChunkStorage(Path storageDir, BlockMapper<S> mapping, BlockStateAdapter<B, S, P> stateAdapter,
+                              NbtAdapter<N> nbtAdapter, S airState) {
         this.storageDir = storageDir;
         this.mapping = mapping;
         this.stateAdapter = stateAdapter;
@@ -96,7 +99,7 @@ public final class CisStorage<B, S, P, N> {
             Objects.requireNonNull(regionFile).write(pos, compressedData);
 
             delta.markSaved();
-        } catch (IOException e) {
+        } catch (Exception e) {
             io.liparakis.chunkis.Chunkis.LOGGER.error("Failed to save CIS chunk {}", pos, e);
         }
     }

@@ -2,11 +2,11 @@ package io.liparakis.chunkis.mixin.storage;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.storage.CisStorage;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.storage.RegionChunkStorage;
 import io.liparakis.chunkis.util.CisNbtUtil;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.util.FabricRegionChunkStorageHelper;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.SharedConstants;
 import net.minecraft.block.Block;
@@ -90,7 +90,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
     @Inject(method = "close", at = @At("TAIL"))
     private void chunkis$onClose(final CallbackInfo ci) {
         forceSaveRemainingDeltas();
-        FabricCisStorageHelper.closeStorage(world);
+        FabricRegionChunkStorageHelper.closeStorage(world);
     }
 
     /**
@@ -343,7 +343,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      * @return the active CIS storage instance
      */
     @Unique
-    private CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
-        return FabricCisStorageHelper.getStorage(world);
+    private RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
+        return FabricRegionChunkStorageHelper.getStorage(world);
     }
 }

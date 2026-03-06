@@ -1,14 +1,15 @@
-package io.liparakis.chunkis.storage.codec;
+package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.core.BlockInstruction;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.Palette;
+import io.liparakis.chunkis.model.BlockInstruction;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.Palette;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.BitUtils.BitWriter;
-import io.liparakis.chunkis.storage.CisChunk;
+import io.liparakis.chunkis.codec.interfaces.BitWriter;
+import io.liparakis.chunkis.codec.ArrayBitWriter;
+import io.liparakis.chunkis.model.CisChunk;
 import io.liparakis.chunkis.storage.CisConstants;
-import io.liparakis.chunkis.storage.CisSection;
+import io.liparakis.chunkis.model.CisSection;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
@@ -307,7 +308,7 @@ public abstract class AbstractCisEncoder<S, N> {
 
     public static class EncoderContext<S> {
         public final ByteArrayOutputStream mainBuffer = new ByteArrayOutputStream(16384);
-        public final BitWriter bitWriter = new BitWriter(8192);
+        public final BitWriter bitWriter = new ArrayBitWriter(8192);
         public final Object2IntMap<S> globalIdMap = new Object2IntOpenHashMap<>();
         public final List<Integer> localPalette = new ArrayList<>(64);
         public final Reference2IntMap<S> fastLocalPaletteIndex = new Reference2IntOpenHashMap<>();

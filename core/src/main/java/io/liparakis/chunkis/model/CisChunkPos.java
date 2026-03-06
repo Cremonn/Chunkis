@@ -1,4 +1,4 @@
-package io.liparakis.chunkis.core;
+package io.liparakis.chunkis.model;
 
 /**
  * Platform-agnostic representation of a chunk position.

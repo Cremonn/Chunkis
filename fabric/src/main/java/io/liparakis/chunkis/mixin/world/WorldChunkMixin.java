@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.storage.CisConstants;
 import io.liparakis.chunkis.util.ChunkRestorer;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
@@ -252,6 +252,7 @@ public class WorldChunkMixin {
         }
         // Reference equality is intentional: we are comparing thread identity,
         // not thread names or logical equality.
+        assert serverWorld.getServer() != null;
         return serverWorld.getServer().getThread() == Thread.currentThread();
     }
 

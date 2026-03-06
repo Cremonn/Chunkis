@@ -1,10 +1,13 @@
-package io.liparakis.chunkis.storage;
+package io.liparakis.chunkis.codec;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
+import io.liparakis.chunkis.codec.interfaces.BitReader;
+import io.liparakis.chunkis.codec.interfaces.BitWriter;
+import io.liparakis.chunkis.codec.interfaces.BlockMapper;
+import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
-import io.liparakis.chunkis.storage.PropertyPacker.PropertyMeta;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Reference2IntMap;
@@ -30,7 +33,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @param <S> BlockState type
  * @param <P> Property type
  */
-public final class CisMapping<B, S, P> implements CisAdapter<S> {
+public final class DefaultBlockMapper<B, S, P> implements BlockMapper<S> {
     private static final Gson GSON = new Gson();
 
     /**
@@ -40,7 +43,7 @@ public final class CisMapping<B, S, P> implements CisAdapter<S> {
 
     private final BlockRegistryAdapter<B> registry;
     private final BlockStateAdapter<B, S, P> stateAdapter;
-    private final PropertyPacker<B, S, P> packer;
+    private final BlockStatePacker<B, S> packer;
 
     /**
      * Map for fast lookup of block IDs from block instances.
@@ -87,8 +90,9 @@ public final class CisMapping<B, S, P> implements CisAdapter<S> {
      * @param packer       the property packer instance
      * @throws IOException if loading fails
      */
-    public CisMapping(Path mappingFile, BlockRegistryAdapter<B> registry, BlockStateAdapter<B, S, P> stateAdapter,
-            PropertyPacker<B, S, P> packer) throws IOException {
+    public DefaultBlockMapper(Path mappingFile, BlockRegistryAdapter<B> registry,
+            BlockStateAdapter<B, S, P> stateAdapter,
+            BlockStatePacker<B, S> packer) throws IOException {
         this.mappingFilePath = mappingFile;
         this.registry = registry;
         this.stateAdapter = stateAdapter;
@@ -263,9 +267,9 @@ public final class CisMapping<B, S, P> implements CisAdapter<S> {
      * @param writer the BitWriter to write to
      * @param state  the BlockState to serialize
      */
-    public void writeStateProperties(BitUtils.BitWriter writer, S state) {
+    public void writeStateProperties(BitWriter writer, S state) {
         B block = stateAdapter.getBlock(state);
-        PropertyMeta<P>[] metas = packer.getPropertyMetas(block);
+        BlockStatePacker.PackerMeta[] metas = packer.getPropertyMetas(block);
         packer.writeProperties(writer, state, metas);
     }
 
@@ -277,14 +281,14 @@ public final class CisMapping<B, S, P> implements CisAdapter<S> {
      * @return the reconstructed BlockState
      * @throws IOException if the block ID is unknown
      */
-    public S readStateProperties(BitUtils.BitReader reader, int blockId) throws IOException {
+    public S readStateProperties(BitReader reader, int blockId) throws IOException {
         B block = getBlockInternal(blockId);
 
         if (block == null) {
             throw new IOException("Unknown Block ID " + blockId + " - stream desync detected");
         }
 
-        PropertyMeta<P>[] metas = packer.getPropertyMetas(block);
+        BlockStatePacker.PackerMeta[] metas = packer.getPropertyMetas(block);
         return packer.readProperties(reader, block, metas);
     }
 

@@ -2,10 +2,10 @@ package io.liparakis.chunkis.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.storage.RegionChunkStorage;
+import io.liparakis.chunkis.util.FabricRegionChunkStorageHelper;
 import net.minecraft.command.permission.Permission;
 import net.minecraft.command.permission.PermissionLevel;
 import net.minecraft.server.command.CommandManager;
@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -149,7 +150,7 @@ public final class MigrationCommand {
         if (!Files.exists(storageDir))
             return 0;
 
-        final CisStorage<?, ?, ?, ?> storage = FabricCisStorageHelper.getStorage(world);
+        final RegionChunkStorage<?, ?, ?, ?> storage = FabricRegionChunkStorageHelper.getStorage(world);
         return migrateRegionFiles(storage, storageDir, dimId);
     }
 
@@ -162,7 +163,7 @@ public final class MigrationCommand {
      * @return number of chunks migrated across all region files in the directory
      */
     private static int migrateRegionFiles(
-            final CisStorage<?, ?, ?, ?> storage,
+            final RegionChunkStorage<?, ?, ?, ?> storage,
             final Path storageDir,
             final String dimId) {
 
@@ -188,7 +189,7 @@ public final class MigrationCommand {
      * @return number of chunks migrated from this file, or 0 if name did not match
      */
     private static int migrateRegionFileIfMatched(
-            final CisStorage<?, ?, ?, ?> storage,
+            final RegionChunkStorage<?, ?, ?, ?> storage,
             final Path path) {
 
         final Matcher matcher = REGION_FILE_PATTERN.matcher(path.getFileName().toString());
@@ -213,7 +214,7 @@ public final class MigrationCommand {
      * @param rz      region Z coordinate
      * @return number of chunks migrated in this region
      */
-    private static int migrateRegion(final CisStorage<?, ?, ?, ?> storage, final int rx, final int rz) {
+    private static int migrateRegion(final RegionChunkStorage<?, ?, ?, ?> storage, final int rx, final int rz) {
         int migrated = 0;
         for (int x = 0; x < REGION_SIZE; x++) {
             for (int z = 0; z < REGION_SIZE; z++) {
@@ -232,7 +233,7 @@ public final class MigrationCommand {
      * <p>
      * The unchecked raw-type cast on {@code storage.save()} is unavoidable here
      * because
-     * {@link CisStorage} is parameterized and the wildcard-captured types cannot be
+     * {@link RegionChunkStorage} is parameterized and the wildcard-captured types cannot be
      * threaded through without changing the public API. The save is safe because
      * the
      * delta originated from the same storage instance.
@@ -246,7 +247,7 @@ public final class MigrationCommand {
      */
     @SuppressWarnings({ "rawtypes", "unchecked" })
     private static boolean migrateChunk(
-            final CisStorage<?, ?, ?, ?> storage,
+            final RegionChunkStorage<?, ?, ?, ?> storage,
             final int rx,
             final int rz,
             final int x,
@@ -258,7 +259,7 @@ public final class MigrationCommand {
         if (!requiresMigration(delta))
             return false;
 
-        ((CisStorage) storage).save(pos, delta);
+        ((RegionChunkStorage) storage).save(pos, delta);
         return true;
     }
 
@@ -294,7 +295,7 @@ public final class MigrationCommand {
      */
     private static Path resolveStorageDir(final ServerWorld world) {
         final String dimPath = world.getRegistryKey().getValue().getPath();
-        Path baseDir = world.getServer().getSavePath(WorldSavePath.ROOT);
+        Path baseDir = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT);
 
         if (!isOverworld(dimPath)) {
             final String namespace = world.getRegistryKey().getValue().getNamespace();

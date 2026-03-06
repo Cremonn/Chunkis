@@ -1,5 +1,6 @@
-package io.liparakis.chunkis.storage;
+package io.liparakis.chunkis.model;
 
+import io.liparakis.chunkis.storage.CisConstants;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 

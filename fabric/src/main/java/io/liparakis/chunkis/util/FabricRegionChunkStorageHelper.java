@@ -1,14 +1,16 @@
 package io.liparakis.chunkis.util;
 
+import io.liparakis.chunkis.codec.DefaultBlockMapper;
+import io.liparakis.chunkis.codec.DefaultBlockStatePacker;
+import io.liparakis.chunkis.codec.interfaces.BlockMapper;
+import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
+import io.liparakis.chunkis.storage.RegionChunkStorage;
 import io.liparakis.chunkis.adapter.FabricBlockRegistryAdapter;
 import io.liparakis.chunkis.adapter.FabricBlockStateAdapter;
 import io.liparakis.chunkis.adapter.FabricNbtAdapter;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.CisMapping;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.storage.PropertyPacker;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -30,17 +32,21 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Thread-safe helper for managing {@link CisStorage} instances per world dimension.
+ * Thread-safe helper for managing {@link RegionChunkStorage} instances per world
+ * dimension.
  *
  * <p>
- * Storage instances are created lazily and cached by {@link RegistryKey}. Concurrent
+ * Storage instances are created lazily and cached by {@link RegistryKey}.
+ * Concurrent
  * access is handled by a combination of {@link ConcurrentHashMap#compute} (for
  * atomic create-or-replace on the storage map) and a per-wrapper
  * {@link ReadWriteLock} (for safe close while reads are in flight).
  *
  * <p>
- * <b>Lifecycle:</b> Call {@link #getStorage(ServerWorld)} to obtain a storage instance.
- * Call {@link #closeStorage(ServerWorld)} when a world unloads to release resources and
+ * <b>Lifecycle:</b> Call {@link #getStorage(ServerWorld)} to obtain a storage
+ * instance.
+ * Call {@link #closeStorage(ServerWorld)} when a world unloads to release
+ * resources and
  * prevent memory leaks.
  *
  * <p>
@@ -49,28 +55,28 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @author Liparakis
  * @version 1.1
  */
-public final class FabricCisStorageHelper {
+public final class FabricRegionChunkStorageHelper {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(FabricCisStorageHelper.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(FabricRegionChunkStorageHelper.class);
 
     // -------------------------------------------------------------------------
     // Path constants
     // -------------------------------------------------------------------------
 
     private static final String DIMENSIONS_DIR = "dimensions";
-    private static final String CHUNKIS_DIR    = "chunkis";
-    private static final String REGIONS_DIR    = "regions";
-    private static final String MAPPING_FILE   = "global_ids.json";
-    private static final String OVERWORLD_ID   = "overworld";
+    private static final String CHUNKIS_DIR = "chunkis";
+    private static final String REGIONS_DIR = "regions";
+    private static final String MAPPING_FILE = "global_ids.json";
+    private static final String OVERWORLD_ID = "overworld";
 
     // -------------------------------------------------------------------------
     // Shared adapter singletons — immutable, reused across all storage instances
     // -------------------------------------------------------------------------
 
-    private static final BlockRegistryAdapter<Block>                       REGISTRY_ADAPTER      = new FabricBlockRegistryAdapter();
-    private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER         = new FabricBlockStateAdapter();
-    private static final NbtAdapter<NbtCompound>                           NBT_ADAPTER           = new FabricNbtAdapter();
-    private static final BlockState                                        DEFAULT_BLOCK_STATE    = Blocks.AIR.getDefaultState();
+    private static final BlockRegistryAdapter<Block> REGISTRY_ADAPTER = new FabricBlockRegistryAdapter();
+    private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER = new FabricBlockStateAdapter();
+    private static final NbtAdapter<NbtCompound> NBT_ADAPTER = new FabricNbtAdapter();
+    private static final BlockState DEFAULT_BLOCK_STATE = Blocks.AIR.getDefaultState();
 
     // -------------------------------------------------------------------------
     // Per-dimension caches
@@ -81,17 +87,15 @@ public final class FabricCisStorageHelper {
      * {@link ConcurrentHashMap#compute} is used for atomic create-or-replace,
      * eliminating the need for an outer lock on the map itself.
      */
-    private static final ConcurrentHashMap<RegistryKey<World>, StorageWrapper> storageMap =
-            new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<RegistryKey<World>, StorageWrapper> storageMap = new ConcurrentHashMap<>();
 
     /**
      * Resolved storage directory paths, cached to avoid repeated filesystem
      * traversal and string concatenation on the hot path.
      */
-    private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache =
-            new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache = new ConcurrentHashMap<>();
 
-    private FabricCisStorageHelper() {
+    private FabricRegionChunkStorageHelper() {
         throw new AssertionError("Utility class");
     }
 
@@ -100,7 +104,7 @@ public final class FabricCisStorageHelper {
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the {@link CisStorage} for the given world, creating and caching
+     * Returns the {@link RegionChunkStorage} for the given world, creating and caching
      * a new instance if one does not exist or has been closed.
      *
      * <p>
@@ -110,11 +114,11 @@ public final class FabricCisStorageHelper {
      * given dimension at a time.
      *
      * @param world the server world (must not be null)
-     * @return the active {@link CisStorage} for the world's dimension
+     * @return the active {@link RegionChunkStorage} for the world's dimension
      * @throws NullPointerException           if world is null
      * @throws StorageInitializationException if storage creation fails
      */
-    public static CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
+    public static RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(final ServerWorld world) {
         Objects.requireNonNull(world, "ServerWorld cannot be null");
 
         final RegistryKey<World> key = world.getRegistryKey();
@@ -127,7 +131,8 @@ public final class FabricCisStorageHelper {
 
         // Slow path: atomic create-or-replace via compute
         return storageMap.compute(key, (k, current) -> {
-            if (current != null && current.isOpen()) return current;
+            if (current != null && current.isOpen())
+                return current;
             closeQuietly(current);
             return openStorageWrapper(world, k);
         }).getStorage();
@@ -150,7 +155,8 @@ public final class FabricCisStorageHelper {
         final StorageWrapper wrapper = storageMap.remove(key);
         pathCache.remove(key);
 
-        if (wrapper == null) return;
+        if (wrapper == null)
+            return;
 
         try {
             wrapper.close();
@@ -171,13 +177,14 @@ public final class FabricCisStorageHelper {
      * @param world the server world
      * @param key   the dimension registry key (for logging)
      * @return a new open {@link StorageWrapper}
-     * @throws StorageInitializationException if the underlying storage cannot be created
+     * @throws StorageInitializationException if the underlying storage cannot be
+     *                                        created
      */
     private static StorageWrapper openStorageWrapper(
             final ServerWorld world,
             final RegistryKey<World> key) {
         try {
-            final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage = buildStorage(world);
+            final RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> storage = buildStorage(world);
             LOGGER.info("Created Chunkis storage for dimension: {}", key.getValue());
             return new StorageWrapper(storage);
         } catch (final Exception e) {
@@ -188,29 +195,28 @@ public final class FabricCisStorageHelper {
     }
 
     /**
-     * Constructs a fully initialized {@link CisStorage} for the given world.
+     * Constructs a fully initialized {@link RegionChunkStorage} for the given world.
      *
      * <p>
-     * A new {@link PropertyPacker} is created per storage instance because it
+     * A new {@link BlockStatePacker} is created per storage instance because it
      * holds dimension-specific state. All adapter singletons are shared.
      *
      * @param world the server world
-     * @return a ready-to-use {@link CisStorage}
-     * @throws IOException if directory creation or mapping file initialization fails
+     * @return a ready-to-use {@link RegionChunkStorage}
+     * @throws IOException if directory creation or mapping file initialization
+     *                     fails
      */
-    private static CisStorage<Block, BlockState, Property<?>, NbtCompound> buildStorage(
+    private static RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> buildStorage(
             final ServerWorld world) throws IOException {
 
-        final Path storageDir  = resolveAndCreateStorageDir(world);
+        final Path storageDir = resolveAndCreateStorageDir(world);
         final Path mappingFile = storageDir.getParent().resolve(MAPPING_FILE);
+        final BlockStatePacker<Block, BlockState> packer = new DefaultBlockStatePacker<>(STATE_ADAPTER);
 
-        // PropertyPacker is per-storage (holds dimension-specific packed property state)
-        final PropertyPacker<Block, BlockState, Property<?>> packer = new PropertyPacker<>(STATE_ADAPTER);
+        final BlockMapper<BlockState> mapping = new DefaultBlockMapper<>(mappingFile, REGISTRY_ADAPTER,
+                STATE_ADAPTER, packer);
 
-        final CisMapping<Block, BlockState, Property<?>> mapping =
-                new CisMapping<>(mappingFile, REGISTRY_ADAPTER, STATE_ADAPTER, packer);
-
-        return new CisStorage<>(storageDir, mapping, STATE_ADAPTER, NBT_ADAPTER, DEFAULT_BLOCK_STATE);
+        return new RegionChunkStorage<>(storageDir, mapping, STATE_ADAPTER, NBT_ADAPTER, DEFAULT_BLOCK_STATE);
     }
 
     // -------------------------------------------------------------------------
@@ -230,7 +236,8 @@ public final class FabricCisStorageHelper {
         final RegistryKey<World> key = world.getRegistryKey();
 
         final Path cached = pathCache.get(key);
-        if (cached != null) return cached;
+        if (cached != null)
+            return cached;
 
         final Path storageDir = computeStorageDirectory(world);
         Files.createDirectories(storageDir);
@@ -244,14 +251,15 @@ public final class FabricCisStorageHelper {
      *
      * <p>
      * Overworld resolves to {@code <save>/chunkis/regions}.
-     * Other dimensions resolve to {@code <save>/dimensions/<namespace>/<path>/chunkis/regions}.
+     * Other dimensions resolve to
+     * {@code <save>/dimensions/<namespace>/<path>/chunkis/regions}.
      *
      * @param world the server world
      * @return the computed (not yet created) directory path
      */
     private static Path computeStorageDirectory(final ServerWorld world) {
         final String dimPath = world.getRegistryKey().getValue().getPath();
-        Path baseDir = world.getServer().getSavePath(WorldSavePath.ROOT);
+        Path baseDir = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT);
 
         if (!isOverworld(dimPath)) {
             final String namespace = world.getRegistryKey().getValue().getNamespace();
@@ -283,7 +291,8 @@ public final class FabricCisStorageHelper {
      * @param wrapper the wrapper to close, may be null
      */
     private static void closeQuietly(final StorageWrapper wrapper) {
-        if (wrapper == null) return;
+        if (wrapper == null)
+            return;
         try {
             wrapper.close();
         } catch (final Exception e) {
@@ -296,7 +305,7 @@ public final class FabricCisStorageHelper {
     // -------------------------------------------------------------------------
 
     /**
-     * Wraps a {@link CisStorage} with lifecycle state tracking.
+     * Wraps a {@link RegionChunkStorage} with lifecycle state tracking.
      *
      * <p>
      * A {@link ReadWriteLock} allows concurrent {@link #getStorage()} reads while
@@ -309,7 +318,7 @@ public final class FabricCisStorageHelper {
      */
     private static final class StorageWrapper {
 
-        private final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage;
+        private final RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> storage;
         private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
         /**
@@ -318,7 +327,7 @@ public final class FabricCisStorageHelper {
          */
         private volatile boolean open = true;
 
-        StorageWrapper(final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage) {
+        StorageWrapper(final RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> storage) {
             this.storage = Objects.requireNonNull(storage, "Storage cannot be null");
         }
 
@@ -329,10 +338,11 @@ public final class FabricCisStorageHelper {
          * @return the active storage instance
          * @throws IllegalStateException if the storage has been closed
          */
-        CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
+        RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage() {
             lock.readLock().lock();
             try {
-                if (!open) throw new IllegalStateException("Storage has been closed");
+                if (!open)
+                    throw new IllegalStateException("Storage has been closed");
                 return storage;
             } finally {
                 lock.readLock().unlock();
@@ -356,7 +366,8 @@ public final class FabricCisStorageHelper {
         void close() {
             lock.writeLock().lock();
             try {
-                if (!open) return;
+                if (!open)
+                    return;
                 storage.close();
                 open = false;
             } finally {
@@ -370,7 +381,7 @@ public final class FabricCisStorageHelper {
     // -------------------------------------------------------------------------
 
     /**
-     * Thrown when a {@link CisStorage} instance cannot be created for a dimension.
+     * Thrown when a {@link RegionChunkStorage} instance cannot be created for a dimension.
      * Wraps the underlying cause for full stack trace propagation.
      */
     public static final class StorageInitializationException extends RuntimeException {

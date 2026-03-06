@@ -1,10 +1,10 @@
 package io.liparakis.chunkis.mixin.storage;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.CisChunkPos;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.util.CisNbtUtil;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.util.FabricRegionChunkStorageHelper;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
@@ -141,7 +141,7 @@ public class EntityChunkDataAccessMixin {
     @Unique
     private void persistDelta(final ChunkPos pos, final ChunkDelta<BlockState, NbtCompound> delta) {
         try {
-            FabricCisStorageHelper.getStorage(world).save(new CisChunkPos(pos.x, pos.z), delta);
+            FabricRegionChunkStorageHelper.getStorage(world).save(new CisChunkPos(pos.x, pos.z), delta);
         } catch (final Exception e) {
             Chunkis.LOGGER.error(
                     "Chunkis: Failed to flush chunk delta to disk in EntityChunkDataAccess for {}", pos, e);

@@ -1,6 +1,6 @@
 package io.liparakis.chunkis.util;
 
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NbtCompound;
@@ -89,7 +89,7 @@ public final class CisNbtUtil {
      * Writes a {@link ChunkDelta} presence marker into the given root NBT compound.
      *
      * <p>
-     * The actual delta data is stored separately by {@code CisStorage}. This method
+     * The actual delta data is stored separately by {@code RegionChunkStorage}. This method
      * only writes a {@value #HAS_DELTA_KEY} flag under {@value #CHUNKIS_DATA_KEY}
      * so that the chunk deserializer knows to look up the delta on load.
      *

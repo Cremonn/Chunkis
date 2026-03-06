@@ -1,9 +1,9 @@
-package io.liparakis.chunkis.storage.codec;
+package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.CisAdapter;
+import io.liparakis.chunkis.spi.CisAdapter;
 
 import java.io.DataOutputStream;
 import java.io.IOException;

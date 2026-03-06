@@ -3,12 +3,13 @@ package io.liparakis.chunkis.util;
 import io.liparakis.chunkis.adapter.FabricBlockRegistryAdapter;
 import io.liparakis.chunkis.adapter.FabricBlockStateAdapter;
 import io.liparakis.chunkis.adapter.FabricNbtAdapter;
+import io.liparakis.chunkis.codec.DefaultBlockStatePacker;
+import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
+import io.liparakis.chunkis.codec.stream.CisNetworkDecoder;
+import io.liparakis.chunkis.codec.stream.CisNetworkEncoder;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.PropertyPacker;
-import io.liparakis.chunkis.storage.codec.CisNetworkDecoder;
-import io.liparakis.chunkis.storage.codec.CisNetworkEncoder;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -43,7 +44,7 @@ public final class FabricNetworkCodecFactory {
     private static final BlockRegistryAdapter<Block> REGISTRY_ADAPTER = new FabricBlockRegistryAdapter();
     private static final BlockStateAdapter<Block, BlockState, Property<?>> STATE_ADAPTER = new FabricBlockStateAdapter();
     private static final NbtAdapter<NbtCompound> NBT_ADAPTER = new FabricNbtAdapter();
-    private static final PropertyPacker<Block, BlockState, Property<?>> PROPERTY_PACKER = new PropertyPacker<>(STATE_ADAPTER);
+    private static final BlockStatePacker<Block, BlockState> PROPERTY_PACKER = new DefaultBlockStatePacker<>(STATE_ADAPTER);
 
     /**
      * Cached air state used as the "no block" sentinel in codec operations.

@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.random.Random;

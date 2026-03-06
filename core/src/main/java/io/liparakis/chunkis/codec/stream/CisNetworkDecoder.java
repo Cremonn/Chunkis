@@ -1,11 +1,11 @@
-package io.liparakis.chunkis.storage.codec;
+package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.core.Palette;
+import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
+import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.model.Palette;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.PropertyPacker;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -29,14 +29,14 @@ import java.util.List;
 public final class CisNetworkDecoder<B, S, P, N> extends AbstractCisDecoder<S, N> {
 
     private final BlockRegistryAdapter<B> registryAdapter;
-    private final PropertyPacker<B, S, P> propertyPacker;
+    private final BlockStatePacker<B, S> propertyPacker;
 
     /**
      * Constructs a new decoder with pre-allocated buffers.
      */
     public CisNetworkDecoder(
             BlockRegistryAdapter<B> registryAdapter,
-            PropertyPacker<B, S, P> propertyPacker,
+            BlockStatePacker<B, S> propertyPacker,
             BlockStateAdapter<B, S, P> stateAdapter,
             NbtAdapter<N> nbtAdapter,
             S airState) {

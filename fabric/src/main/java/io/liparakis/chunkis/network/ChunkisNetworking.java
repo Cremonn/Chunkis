@@ -2,8 +2,8 @@ package io.liparakis.chunkis.network;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.storage.codec.CisNetworkEncoder;
+import io.liparakis.chunkis.codec.stream.CisNetworkEncoder;
+import io.liparakis.chunkis.model.ChunkDelta;
 import io.liparakis.chunkis.util.FabricNetworkCodecFactory;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.network.ServerPlayerEntity;

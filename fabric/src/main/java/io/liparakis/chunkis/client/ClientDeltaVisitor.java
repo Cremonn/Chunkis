@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.client;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.model.ChunkDelta;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.block.BlockState;
