@@ -13,7 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Fabric implementation of BlockRegistryAdapter with performance optimizations.
  * This adapter provides bidirectional mapping between blocks and their string
- * identifiers with caching to reduce memory allocation and improve lookup performance.
+ * identifiers with caching to reduce memory allocation and improve lookup
+ * performance.
  *
  * <p>
  * Thread-safe for concurrent access.
@@ -25,13 +26,13 @@ public final class FabricBlockRegistryAdapter implements BlockRegistryAdapter<Bl
 
     // Bidirectional caches for fast lookups.
     // ConcurrentHashMap provides thread-safety without synchronized overhead.
-    private final Map<Block, String>      blockToIdCache          = new ConcurrentHashMap<>(256);
+    private final Map<Block, String> blockToIdCache = new ConcurrentHashMap<>(256);
     private final Map<String, Identifier> stringToIdentifierCache = new ConcurrentHashMap<>(256);
-    private final Map<String, Block>      idToBlockCache          = new ConcurrentHashMap<>(256);
+    private final Map<String, Block> idToBlockCache = new ConcurrentHashMap<>(256);
 
     // Pre-interned constants for the most common case.
-    private static final Block  AIR_BLOCK = Blocks.AIR;
-    private static final String AIR_ID    = "minecraft:air";
+    private static final Block AIR_BLOCK = Blocks.AIR;
+    private static final String AIR_ID = "minecraft:air";
 
     /**
      * Maximum cache size to prevent unbounded memory growth.
@@ -54,7 +55,8 @@ public final class FabricBlockRegistryAdapter implements BlockRegistryAdapter<Bl
     @Override
     public String getId(final Block block) {
         Objects.requireNonNull(block, "Block cannot be null");
-        if (isAirBlock(block)) return AIR_ID;
+        if (isAirBlock(block))
+            return AIR_ID;
         return blockToIdCache.computeIfAbsent(block, this::resolveBlockId);
     }
 
@@ -66,8 +68,10 @@ public final class FabricBlockRegistryAdapter implements BlockRegistryAdapter<Bl
      */
     @Override
     public Block getBlock(final String id) {
-        if (isInvalidId(id)) return AIR_BLOCK;
-        if (isAirId(id))     return AIR_BLOCK;
+        if (isInvalidId(id))
+            return AIR_BLOCK;
+        if (isAirId(id))
+            return AIR_BLOCK;
         return idToBlockCache.computeIfAbsent(id, this::parseAndRetrieveBlock);
     }
 

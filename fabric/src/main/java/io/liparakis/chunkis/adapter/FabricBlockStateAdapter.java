@@ -9,14 +9,16 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * High-performance Fabric implementation of BlockStateAdapter with aggressive caching.
+ * High-performance Fabric implementation of BlockStateAdapter with aggressive
+ * caching.
  *
  * <p>
  * This adapter optimizes for Minecraft's immutable block state system where:
  * <ul>
  * <li>Block properties are defined at registration time and never change</li>
  * <li>Property values are finite and immutable</li>
- * <li>Block states are queried millions of times per second in chunk operations</li>
+ * <li>Block states are queried millions of times per second in chunk
+ * operations</li>
  * </ul>
  *
  * <p>
@@ -29,13 +31,13 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
 
     // Shared immutable sentinels to avoid allocation for blocks with no properties.
     private static final List<Property<?>> EMPTY_PROPERTIES = Collections.emptyList();
-    private static final List<Object>      EMPTY_VALUES      = Collections.emptyList();
+    private static final List<Object> EMPTY_VALUES = Collections.emptyList();
 
     // Caches for immutable block metadata — safe to retain indefinitely since
     // block properties and their values are fixed at registration time.
-    private final Map<Block,       List<Property<?>>>     blockPropertiesCache = new ConcurrentHashMap<>(256);
-    private final Map<Property<?>, List<Object>>          propertyValuesCache  = new ConcurrentHashMap<>(512);
-    private final Map<Property<?>, Map<Object, Integer>>  valueIndexCache      = new ConcurrentHashMap<>(512);
+    private final Map<Block, List<Property<?>>> blockPropertiesCache = new ConcurrentHashMap<>(256);
+    private final Map<Property<?>, List<Object>> propertyValuesCache = new ConcurrentHashMap<>(512);
+    private final Map<Property<?>, Map<Object, Integer>> valueIndexCache = new ConcurrentHashMap<>(512);
 
     // -------------------------------------------------------------------------
     // Reflection bootstrap — resolves Property.getValues() once at class load.
@@ -63,13 +65,15 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
 
     /**
      * Scans all public methods on {@link Property} to find one that matches
-     * the expected signature of {@code getValues()}: no parameters, returns a Collection.
+     * the expected signature of {@code getValues()}: no parameters, returns a
+     * Collection.
      *
      * @return the matching Method, or null if none found
      */
     private static java.lang.reflect.Method scanForValuesMethod() {
         for (final java.lang.reflect.Method method : Property.class.getMethods()) {
-            if (isValuesMethod(method)) return method;
+            if (isValuesMethod(method))
+                return method;
         }
         return null;
     }
@@ -90,7 +94,8 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
 
     /**
      * Returns true if the return type is a known false-positive that should
-     * be excluded during method scanning (e.g., {@code getName()}, {@code getType()}).
+     * be excluded during method scanning (e.g., {@code getName()},
+     * {@code getType()}).
      *
      * @param returnType the return type to check
      * @return true if the type should be excluded from matching
@@ -152,7 +157,8 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * Returns an immutable list of possible values for a property with caching.
      *
      * <p>
-     * Uses reflection to handle method signature differences across Minecraft versions,
+     * Uses reflection to handle method signature differences across Minecraft
+     * versions,
      * with a direct-call fallback if reflection fails.
      *
      * @param property the property
@@ -194,7 +200,8 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      * @param state      the original block state
      * @param property   the property to modify
      * @param valueIndex the index of the desired value
-     * @return new block state with the property set, or original state if index is invalid
+     * @return new block state with the property set, or original state if index is
+     *         invalid
      * @throws NullPointerException if state or property is null
      */
     @Override
@@ -206,7 +213,8 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         Objects.requireNonNull(property, "Property cannot be null");
 
         final List<Object> values = getPropertyValues(property);
-        if (isOutOfBounds(valueIndex, values)) return state;
+        if (isOutOfBounds(valueIndex, values))
+            return state;
 
         return applyPropertyValue(state, property, values.get(valueIndex));
     }
@@ -288,8 +296,10 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
     }
 
     /**
-     * Reflectively invokes {@code Property.getValues()} using the pre-resolved method.
-     * Falls back to a direct call if the method could not be resolved at class load.
+     * Reflectively invokes {@code Property.getValues()} using the pre-resolved
+     * method.
+     * Falls back to a direct call if the method could not be resolved at class
+     * load.
      *
      * @param property the property to query
      * @return the raw collection of allowed values
@@ -367,10 +377,11 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
      *
      * @param state    the block state to modify
      * @param property the property to set
-     * @param value    the value to apply, sourced from the property's own value list
+     * @param value    the value to apply, sourced from the property's own value
+     *                 list
      * @return a new BlockState with the property applied
      */
-    @SuppressWarnings({"rawtypes", "unchecked"})
+    @SuppressWarnings({ "rawtypes", "unchecked" })
     private static BlockState applyPropertyValue(
             final BlockState state,
             final Property<?> property,

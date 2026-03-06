@@ -20,10 +20,10 @@ public final class CisConstants {
 
     /**
      * Current CIS format version.
-     * V8: Increased palette bit width to 12 bits to support 4096 unique blocks.
+     * V9: Increased palette bit width to 12 bits to support 4096 unique blocks.
      * Increment when making breaking changes to the serialization format.
      */
-    public static final int VERSION = 8;
+    public static final int VERSION = 9;
 
     // ==================== Section Geometry ====================
 

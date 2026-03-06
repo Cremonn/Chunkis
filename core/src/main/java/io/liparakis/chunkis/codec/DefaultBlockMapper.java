@@ -1,26 +1,14 @@
 package io.liparakis.chunkis.codec;
 
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import io.liparakis.chunkis.codec.interfaces.BitReader;
 import io.liparakis.chunkis.codec.interfaces.BitWriter;
 import io.liparakis.chunkis.codec.interfaces.BlockMapper;
 import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
-import io.liparakis.chunkis.spi.BlockRegistryAdapter;
+import io.liparakis.chunkis.model.BlockStateRegistry;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.objects.Reference2IntMap;
-import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
+import io.liparakis.chunkis.storage.GlobalIdsPersistence;
 
-import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Optimized mapping system for block translation with lossless property-based
@@ -33,231 +21,41 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @param <S> BlockState type
  * @param <P> Property type
  */
-public final class DefaultBlockMapper<B, S, P> implements BlockMapper<S> {
-    private static final Gson GSON = new Gson();
+public record DefaultBlockMapper<B, S, P>(BlockStateRegistry<B> globalRegistry, BlockStateAdapter<B, S, P> stateAdapter,
+                                          BlockStatePacker<B, S> packer) implements BlockMapper<S> {
 
     /**
-     * Constant representing a block that is not yet mapped.
-     */
-    private static final int MISSING_BLOCK_ID = -1;
-
-    private final BlockRegistryAdapter<B> registry;
-    private final BlockStateAdapter<B, S, P> stateAdapter;
-    private final BlockStatePacker<B, S> packer;
-
-    /**
-     * Map for fast lookup of block IDs from block instances.
-     */
-    private final Reference2IntMap<B> blockToId = new Reference2IntOpenHashMap<>();
-
-    /**
-     * Map for fast lookup of blocks from their persistent IDs.
-     */
-    private final Int2ObjectMap<B> idToBlock = new Int2ObjectOpenHashMap<>();
-
-    /**
-     * Path where the JSON mapping file is stored.
-     */
-    private final Path mappingFilePath;
-
-    /**
-     * Read-write lock to ensure thread-safe operations during concurrent chunk
-     * saving.
-     */
-    private final ReadWriteLock rwLock = new ReentrantReadWriteLock();
-
-    /**
-     * Lock used specifically for flushing data to disk.
-     */
-    private final Object flushLock = new Object();
-
-    /**
-     * The next available block ID to assign.
-     */
-    private int nextId = 0;
-
-    /**
-     * The number of mappings currently saved on disk.
-     */
-    private int savedCount = 0;
-
-    /**
-     * Creates a new CisMapping and loads existing mappings from file if present.
+     * Creates a new DefaultBlockMapper that delegates to a pre-populated
+     * BlockStateRegistry.
      *
-     * @param mappingFile  the path to the mapping file
-     * @param registry     the block registry adapter
-     * @param stateAdapter the block state adapter
-     * @param packer       the property packer instance
-     * @throws IOException if loading fails
+     * @param globalRegistry the fully populated block state registry
+     * @param stateAdapter   the block state adapter
+     * @param packer         the property packer instance
      */
-    public DefaultBlockMapper(Path mappingFile, BlockRegistryAdapter<B> registry,
-            BlockStateAdapter<B, S, P> stateAdapter,
-            BlockStatePacker<B, S> packer) throws IOException {
-        this.mappingFilePath = mappingFile;
-        this.registry = registry;
-        this.stateAdapter = stateAdapter;
-        this.packer = packer;
-
-        blockToId.defaultReturnValue(MISSING_BLOCK_ID);
-
-        if (mappingFile.toFile().exists()) {
-            loadMappings();
-        }
-
-        ensureAirMapped();
+    public DefaultBlockMapper {
     }
 
     /**
-     * Loads existing block mappings from the mapping file.
-     */
-    private void loadMappings() throws IOException {
-        try (FileReader reader = new FileReader(mappingFilePath.toFile())) {
-            Map<String, Integer> map = GSON.fromJson(reader, new TypeToken<Map<String, Integer>>() {
-            }.getType());
-
-            if (map == null)
-                return;
-
-            B air = registry.getAir();
-            String airId = registry.getId(air); // "minecraft:air"
-
-            for (Map.Entry<String, Integer> entry : map.entrySet()) {
-                String idStr = entry.getKey();
-                B block = registry.getBlock(idStr);
-
-                // If block is default (failed generic parse) or explicitly air check
-                if (block == air && !idStr.equals(airId)) {
-                    // Skip if registry returned default/air for a non-air ID (meaning modded block
-                    // missing)
-                    continue;
-                }
-
-                // If registry returns null for missing blocks, we need to handle that.
-                // Assuming adapter returns a fallback or null.
-                // If it returns null:
-                if (block == null)
-                    continue;
-
-                int blockId = entry.getValue();
-                registerBlockInternal(block, blockId);
-
-                if (blockId >= nextId) {
-                    nextId = blockId + 1;
-                }
-            }
-        }
-    }
-
-    /**
-     * Ensures air is always mapped to prevent desync issues.
-     */
-    private void ensureAirMapped() {
-        B air = registry.getAir();
-        if (blockToId.getInt(air) == MISSING_BLOCK_ID) {
-            registerBlockInternal(air, nextId);
-            nextId++;
-            flush();
-        }
-    }
-
-    /**
-     * Gets the block ID for a given block state, registering it if necessary.
-     * Thread-safe with optimistic read-lock strategy.
+     * Gets the global block ID for a given block state.
+     * Always returns the mapped ID, resolving orphans automatically via fallback.
      *
      * @param state the block state
      * @return the block ID
      */
+    @Override
     public int getBlockId(S state) {
         B block = stateAdapter.getBlock(state);
-
-        rwLock.readLock().lock();
-        try {
-            int id = blockToId.getInt(block);
-            if (id != MISSING_BLOCK_ID) {
-                return id;
-            }
-        } finally {
-            rwLock.readLock().unlock();
-        }
-
-        rwLock.writeLock().lock();
-        try {
-            int id = blockToId.getInt(block);
-            if (id != MISSING_BLOCK_ID) {
-                return id;
-            }
-
-            id = nextId++;
-            registerBlockInternal(block, id);
-
-            return id;
-        } finally {
-            rwLock.writeLock().unlock();
-        }
+        return globalRegistry.getId(block);
     }
 
     /**
-     * Internal method to register a block without locking.
-     * <p>
-     * Caller MUST hold the write lock before calling this.
-     *
-     * @param block the block to register
-     * @param id    the ID to assign
+     * No-op. The BlockStateRegistry is pre-populated and saved atomically via
+     * {@link GlobalIdsPersistence} so mapping
+     * files do not need dynamic flushing.
      */
-    private void registerBlockInternal(B block, int id) {
-        blockToId.put(block, id);
-        idToBlock.put(id, block);
-    }
-
-    /**
-     * Flushes new mappings to disk if there are unsaved changes.
-     * Uses double-checked locking to minimize I/O.
-     */
+    @Override
     public void flush() {
-        if (blockToId.size() <= savedCount) {
-            return;
-        }
-
-        Map<String, Integer> snapshot = createMappingSnapshot();
-
-        synchronized (flushLock) {
-            if (snapshot.size() <= savedCount) {
-                return;
-            }
-
-            try (FileWriter writer = new FileWriter(mappingFilePath.toFile())) {
-                GSON.toJson(snapshot, writer);
-                savedCount = snapshot.size();
-            } catch (Exception e) {
-                System.err.println("Chunkis: Failed to save mappings: " + e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * Creates a snapshot of current mappings in a format suitable for JSON
-     * serialization.
-     *
-     * @return a map of block identifier strings to their allocated IDs
-     */
-    private Map<String, Integer> createMappingSnapshot() {
-        Map<String, Integer> snapshot = new HashMap<>();
-
-        rwLock.readLock().lock();
-        try {
-            if (blockToId.size() <= savedCount) {
-                return snapshot;
-            }
-
-            for (Int2ObjectMap.Entry<B> entry : idToBlock.int2ObjectEntrySet()) {
-                String id = registry.getId(entry.getValue());
-                snapshot.put(id, entry.getIntKey());
-            }
-        } finally {
-            rwLock.readLock().unlock();
-        }
-
-        return snapshot;
+        // No-op
     }
 
     /**
@@ -267,6 +65,7 @@ public final class DefaultBlockMapper<B, S, P> implements BlockMapper<S> {
      * @param writer the BitWriter to write to
      * @param state  the BlockState to serialize
      */
+    @Override
     public void writeStateProperties(BitWriter writer, S state) {
         B block = stateAdapter.getBlock(state);
         BlockStatePacker.PackerMeta[] metas = packer.getPropertyMetas(block);
@@ -277,12 +76,13 @@ public final class DefaultBlockMapper<B, S, P> implements BlockMapper<S> {
      * Reads property values from BitReader and reconstructs the BlockState.
      *
      * @param reader  the BitReader to read from
-     * @param blockId the block ID
+     * @param blockId the global block ID
      * @return the reconstructed BlockState
      * @throws IOException if the block ID is unknown
      */
+    @Override
     public S readStateProperties(BitReader reader, int blockId) throws IOException {
-        B block = getBlockInternal(blockId);
+        B block = globalRegistry.getState((short) blockId);
 
         if (block == null) {
             throw new IOException("Unknown Block ID " + blockId + " - stream desync detected");
@@ -290,20 +90,5 @@ public final class DefaultBlockMapper<B, S, P> implements BlockMapper<S> {
 
         BlockStatePacker.PackerMeta[] metas = packer.getPropertyMetas(block);
         return packer.readProperties(reader, block, metas);
-    }
-
-    /**
-     * Gets the block instance for a given ID.
-     *
-     * @param id the block ID
-     * @return the block instance, or {@code null} if not mapped
-     */
-    private B getBlockInternal(int id) {
-        rwLock.readLock().lock();
-        try {
-            return idToBlock.get(id);
-        } finally {
-            rwLock.readLock().unlock();
-        }
     }
 }

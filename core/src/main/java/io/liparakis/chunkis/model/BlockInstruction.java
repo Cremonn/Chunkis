@@ -10,31 +10,36 @@ import io.liparakis.chunkis.storage.CisConstants;
  * usage and improve cache locality.
  * </p>
  * <p>
- * The packed long format is: {@code [paletteIndex: 32 bits][y: 20 bits][x: 4 bits][z: 4 bits][reserved: 4 bits]}
+ * The packed long format is:
+ * {@code [paletteIndex: 32 bits][y: 20 bits][x: 4 bits][z: 4 bits][reserved: 4 bits]}
  * </p>
  * <p>
  * Bit layout details:
  * <ul>
- *   <li>Bits 0-3: Reserved (unused)</li>
- *   <li>Bits 4-7: Z coordinate (4 bits, range 0-15)</li>
- *   <li>Bits 8-11: X coordinate (4 bits, range 0-15)</li>
- *   <li>Bits 12-31: Y coordinate (20 bits, signed, supports Minecraft's full height range)</li>
- *   <li>Bits 32-63: Palette index (32 bits, references a BlockState in the chunk's palette)</li>
+ * <li>Bits 0-3: Reserved (unused)</li>
+ * <li>Bits 4-7: Z coordinate (4 bits, range 0-15)</li>
+ * <li>Bits 8-11: X coordinate (4 bits, range 0-15)</li>
+ * <li>Bits 12-31: Y coordinate (20 bits, signed, supports Minecraft's full
+ * height range)</li>
+ * <li>Bits 32-63: Palette index (32 bits, references a BlockState in the
+ * chunk's palette)</li>
  * </ul>
  * </p>
  * <p>
  * This compact representation allows:
  * <ul>
- *   <li>Efficient storage with 8 bytes per instruction instead of object overhead</li>
- *   <li>Fast network transmission</li>
- *   <li>Better CPU cache utilization</li>
- *   <li>Support for large palettes (up to 2^32 unique block states)</li>
+ * <li>Efficient storage with 8 bytes per instruction instead of object
+ * overhead</li>
+ * <li>Fast network transmission</li>
+ * <li>Better CPU cache utilization</li>
+ * <li>Support for large palettes (up to 2^32 unique block states)</li>
  * </ul>
  * </p>
  *
- * @param x the x-coordinate within the chunk (0-15)
- * @param y the y-coordinate in world space (supports negative values for deep worlds)
- * @param z the z-coordinate within the chunk (0-15)
+ * @param x            the x-coordinate within the chunk (0-15)
+ * @param y            the y-coordinate in world space (supports negative values
+ *                     for deep worlds)
+ * @param z            the z-coordinate within the chunk (0-15)
  * @param paletteIndex the index into the chunk's BlockState palette
  * @see ChunkDelta
  * @see Palette
@@ -70,7 +75,6 @@ public record BlockInstruction(byte x, int y, byte z, int paletteIndex) {
      *
      * @param packed the packed long containing all instruction data
      * @return a new BlockInstruction with unpacked coordinates and palette index
-     * @see #pack()
      */
     public static BlockInstruction fromPacked(long packed) {
         byte z = (byte) unpackZ(packed);
@@ -96,7 +100,6 @@ public record BlockInstruction(byte x, int y, byte z, int paletteIndex) {
      * @param y the y-coordinate (world height)
      * @param z the z-coordinate (0-15)
      * @return a packed long containing the position data
-     * @see #pack()
      */
     public static long packPos(int x, int y, int z) {
         return ((long) (y & 0xFFFFF) << 12) |
@@ -119,7 +122,8 @@ public record BlockInstruction(byte x, int y, byte z, int paletteIndex) {
      * Extracts the Y coordinate from a packed position or instruction.
      * <p>
      * This method properly handles sign extension for negative Y values,
-     * supporting Minecraft's full world height range including negative coordinates.
+     * supporting Minecraft's full world height range including negative
+     * coordinates.
      * </p>
      *
      * @param packed the packed long value
@@ -146,21 +150,20 @@ public record BlockInstruction(byte x, int y, byte z, int paletteIndex) {
     }
 
     /**
-     * Packs this instruction into a single long for compact storage.
+     * Packs coordinates and a palette index into a single long without
+     * allocating a {@link BlockInstruction} record.
      * <p>
-     * The packed format is: {@code [paletteIndex: 32 bits][y: 20 bits][x: 4 bits][z: 4 bits][reserved: 4 bits]}
-     * </p>
-     * <p>
-     * This allows storing complete block change instructions in just 8 bytes,
-     * significantly reducing memory usage compared to object-based storage.
-     * The packed representation is also ideal for network transmission and
-     * disk serialization.
+     * Prefer this static method in hot loops (e.g., bulk insertion) to eliminate
+     * transient object allocation.
      * </p>
      *
-     * @return a packed long representation of this instruction
-     * @see #fromPacked(long)
+     * @param x            x-coordinate within the chunk (0-15)
+     * @param y            y-coordinate in world space
+     * @param z            z-coordinate within the chunk (0-15)
+     * @param paletteIndex palette ID for the block state
+     * @return packed long representation
      */
-    public long pack() {
+    public static long packDirect(int x, int y, int z, int paletteIndex) {
         return ((long) paletteIndex << 32) |
                 ((long) (y & 0xFFFFF) << 12) |
                 ((long) (x & 0xF) << 8) |

@@ -4,6 +4,8 @@ import io.liparakis.chunkis.codec.DefaultBlockMapper;
 import io.liparakis.chunkis.codec.DefaultBlockStatePacker;
 import io.liparakis.chunkis.codec.interfaces.BlockMapper;
 import io.liparakis.chunkis.codec.interfaces.BlockStatePacker;
+import io.liparakis.chunkis.model.BlockStateRegistry;
+import io.liparakis.chunkis.storage.GlobalIdsPersistence;
 import io.liparakis.chunkis.storage.RegionChunkStorage;
 import io.liparakis.chunkis.adapter.FabricBlockRegistryAdapter;
 import io.liparakis.chunkis.adapter.FabricBlockStateAdapter;
@@ -15,6 +17,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.state.property.Property;
@@ -32,7 +35,8 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Thread-safe helper for managing {@link RegionChunkStorage} instances per world
+ * Thread-safe helper for managing {@link RegionChunkStorage} instances per
+ * world
  * dimension.
  *
  * <p>
@@ -95,6 +99,11 @@ public final class FabricRegionChunkStorageHelper {
      */
     private static final ConcurrentHashMap<RegistryKey<World>, Path> pathCache = new ConcurrentHashMap<>();
 
+    /**
+     * Shared global registry instance to assign IDs across all dimensions.
+     */
+    private static volatile BlockStateRegistry<Block> GLOBAL_REGISTRY = null;
+
     private FabricRegionChunkStorageHelper() {
         throw new AssertionError("Utility class");
     }
@@ -104,7 +113,8 @@ public final class FabricRegionChunkStorageHelper {
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the {@link RegionChunkStorage} for the given world, creating and caching
+     * Returns the {@link RegionChunkStorage} for the given world, creating and
+     * caching
      * a new instance if one does not exist or has been closed.
      *
      * <p>
@@ -195,7 +205,8 @@ public final class FabricRegionChunkStorageHelper {
     }
 
     /**
-     * Constructs a fully initialized {@link RegionChunkStorage} for the given world.
+     * Constructs a fully initialized {@link RegionChunkStorage} for the given
+     * world.
      *
      * <p>
      * A new {@link BlockStatePacker} is created per storage instance because it
@@ -210,13 +221,35 @@ public final class FabricRegionChunkStorageHelper {
             final ServerWorld world) throws IOException {
 
         final Path storageDir = resolveAndCreateStorageDir(world);
-        final Path mappingFile = storageDir.getParent().resolve(MAPPING_FILE);
         final BlockStatePacker<Block, BlockState> packer = new DefaultBlockStatePacker<>(STATE_ADAPTER);
-
-        final BlockMapper<BlockState> mapping = new DefaultBlockMapper<>(mappingFile, REGISTRY_ADAPTER,
-                STATE_ADAPTER, packer);
+        final io.liparakis.chunkis.model.BlockStateRegistry<Block> registry = getOrCreateGlobalRegistry(world);
+        final BlockMapper<BlockState> mapping = new DefaultBlockMapper<>(registry, STATE_ADAPTER, packer);
 
         return new RegionChunkStorage<>(storageDir, mapping, STATE_ADAPTER, NBT_ADAPTER, DEFAULT_BLOCK_STATE);
+    }
+
+    /**
+     * Lazy-loads the global BlockStateRegistry on first chunk access.
+     */
+    private static BlockStateRegistry<Block> getOrCreateGlobalRegistry(ServerWorld world)
+            throws IOException {
+        BlockStateRegistry<Block> reg = GLOBAL_REGISTRY;
+        if (reg != null)
+            return reg;
+        synchronized (FabricRegionChunkStorageHelper.class) {
+            reg = GLOBAL_REGISTRY;
+            if (reg == null) {
+                Path globalMappingFile = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT)
+                        .resolve(CHUNKIS_DIR).resolve(MAPPING_FILE);
+                Files.createDirectories(globalMappingFile.getParent());
+                GLOBAL_REGISTRY = reg = GlobalIdsPersistence.loadOrInitRegistry(
+                        globalMappingFile,
+                        Registries.BLOCK,
+                        REGISTRY_ADAPTER,
+                        Blocks.AIR);
+            }
+        }
+        return reg;
     }
 
     // -------------------------------------------------------------------------
@@ -381,7 +414,8 @@ public final class FabricRegionChunkStorageHelper {
     // -------------------------------------------------------------------------
 
     /**
-     * Thrown when a {@link RegionChunkStorage} instance cannot be created for a dimension.
+     * Thrown when a {@link RegionChunkStorage} instance cannot be created for a
+     * dimension.
      * Wraps the underlying cause for full stack trace propagation.
      */
     public static final class StorageInitializationException extends RuntimeException {

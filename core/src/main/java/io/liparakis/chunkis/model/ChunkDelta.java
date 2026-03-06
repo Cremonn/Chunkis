@@ -38,7 +38,7 @@ import java.util.function.Predicate;
  * @see Palette
  */
 public final class ChunkDelta<S, N> {
-    private static final int INITIAL_CAPACITY = 64;
+    private static final int INITIAL_CAPACITY = 256;
 
     /**
      * Packed block instructions stored as long values for memory efficiency
@@ -115,6 +115,27 @@ public final class ChunkDelta<S, N> {
         this(s -> false); // Default: nothing is considered empty
     }
 
+    /**
+     * Constructs a new empty ChunkDelta with a size hint.
+     * Pre-allocates internal arrays to avoid resizing during bulk insertions.
+     *
+     * @param isEmptyState Predicate to check if a state is considered "empty"
+     * @param expectedSize expected number of block changes
+     */
+    public ChunkDelta(Predicate<S> isEmptyState, int expectedSize) {
+        int capacity = Math.max(INITIAL_CAPACITY, Integer.highestOneBit(expectedSize - 1) << 1);
+        this.packedInstructions = new long[capacity];
+        this.instructionCount = 0;
+        this.blockPalette = new Palette<>(expectedSize);
+        this.positionMap = new Long2IntOpenHashMap(expectedSize);
+        this.positionMap.defaultReturnValue(-1);
+        this.activeEntities = new Int2ObjectOpenHashMap<>();
+        this.pendingEntities = new ArrayList<>();
+        this.isDirty = false;
+        this.needsMigration = false;
+        this.isEmptyState = isEmptyState;
+    }
+
     // ==================== Block Changes ====================
 
     /**
@@ -157,7 +178,7 @@ public final class ChunkDelta<S, N> {
      * @param markDirty Whether to mark the delta as dirty.
      */
     private void updateExistingInstruction(int x, int y, int z, int paletteId, int index, boolean markDirty) {
-        final long newInstruction = new BlockInstruction((byte) x, y, (byte) z, paletteId).pack();
+        final long newInstruction = BlockInstruction.packDirect(x, y, z, paletteId);
 
         if (packedInstructions[index] == newInstruction) {
             return;
@@ -182,7 +203,7 @@ public final class ChunkDelta<S, N> {
      */
     private void addNewInstruction(int x, int y, int z, int paletteId, long posKey, boolean markDirty) {
         ensureCapacity();
-        packedInstructions[instructionCount] = new BlockInstruction((byte) x, y, (byte) z, paletteId).pack();
+        packedInstructions[instructionCount] = BlockInstruction.packDirect(x, y, z, paletteId);
         positionMap.put(posKey, instructionCount++);
 
         if (markDirty) {
@@ -461,20 +482,23 @@ public final class ChunkDelta<S, N> {
 
         // 2. Visit block entities
         if (blockEntities != null && !blockEntities.isEmpty()) {
-            for (Long2ObjectMap.Entry<N> entry : blockEntities.long2ObjectEntrySet()) {
-                long pos = entry.getLongKey();
+            blockEntities.forEach((pos, nbt) -> {
                 int x = BlockInstruction.unpackX(pos);
                 int y = BlockInstruction.unpackY(pos);
                 int z = BlockInstruction.unpackZ(pos);
-
-                visitor.visitBlockEntity(x, y, z, entry.getValue());
-            }
+                visitor.visitBlockEntity(x, y, z, nbt);
+            });
         }
 
         // 3. Visit global entities
-        List<N> allEntities = getEntitiesList();
-        if (!allEntities.isEmpty()) {
-            for (N nbt : allEntities) {
+        if (!activeEntities.isEmpty()) {
+            for (N nbt : activeEntities.values()) {
+                visitor.visitEntity(nbt);
+            }
+        }
+
+        if (!pendingEntities.isEmpty()) {
+            for (N nbt : pendingEntities) {
                 visitor.visitEntity(nbt);
             }
         }

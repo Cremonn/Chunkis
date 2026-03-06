@@ -53,9 +53,14 @@ public final class CisSection<S> {
     public int sparseSize;
 
     /**
-     * Flat array of block states (dense mode).
+     * Flat array of global IDs (dense mode, optimized).
      */
-    public Object[] denseBlocks;
+    public short[] denseShorts;
+
+    /**
+     * Optional global registry to use short[] instead of Object[].
+     */
+    public final BlockStateRegistry<S> globalRegistry;
 
     /**
      * Number of non-air blocks in dense storage.
@@ -63,9 +68,10 @@ public final class CisSection<S> {
     int denseCount;
 
     /**
-     * Creates a new empty section.
+     * Creates a new empty section with a global registry.
      */
-    public CisSection() {
+    public CisSection(BlockStateRegistry<S> registry) {
+        this.globalRegistry = registry;
     }
 
     /**
@@ -137,13 +143,12 @@ public final class CisSection<S> {
      */
     private void setBlockDense(short key, S state, boolean isAir) {
         int index = key & COORD_MASK;
-        @SuppressWarnings("unchecked")
-        S old = (S) denseBlocks[index];
+        S old = getDenseBlock(index);
         boolean wasAir = isAirOrNull(old);
 
         if (isAir) {
             if (!wasAir) {
-                denseBlocks[index] = null;
+                denseShorts[index] = BlockStateRegistry.UNKNOWN_ID;
                 denseCount--;
 
                 if (denseCount < (CisConstants.SPARSE_DENSE_THRESHOLD >> 1)) {
@@ -151,11 +156,18 @@ public final class CisSection<S> {
                 }
             }
         } else {
-            denseBlocks[index] = state;
+            denseShorts[index] = globalRegistry.getId(state);
             if (wasAir) {
                 denseCount++;
             }
         }
+    }
+
+    public S getDenseBlock(int index) {
+        short id = denseShorts[index];
+        if (id == BlockStateRegistry.UNKNOWN_ID)
+            return null;
+        return globalRegistry.getState(id);
     }
 
     /**
@@ -228,6 +240,13 @@ public final class CisSection<S> {
             setBlockDense(key, state, false);
         } else {
             if (sparseSize >= sparseKeys.length) {
+                if (sparseKeys.length >= 64) {
+                    // Beyond 64 entries, going dense is cheaper than
+                    // continuing to grow+copy sparse arrays.
+                    convertToDense();
+                    setBlockDense(key, state, false);
+                    return;
+                }
                 growSparseArrays();
             }
 
@@ -265,11 +284,12 @@ public final class CisSection<S> {
      * Converts the section from sparse to dense storage mode.
      * Occurs when the number of modified blocks exceeds the sparse threshold.
      */
+    @SuppressWarnings("unchecked")
     private void convertToDense() {
-        denseBlocks = new Object[VOLUME];
-
+        denseShorts = new short[VOLUME];
+        Arrays.fill(denseShorts, BlockStateRegistry.UNKNOWN_ID);
         for (int i = 0; i < sparseSize; i++) {
-            denseBlocks[sparseKeys[i] & COORD_MASK] = sparseValues[i];
+            denseShorts[sparseKeys[i] & COORD_MASK] = globalRegistry.getId((S) sparseValues[i]);
         }
 
         denseCount = sparseSize;
@@ -289,7 +309,7 @@ public final class CisSection<S> {
         int count = 0;
 
         for (int i = 0; i < VOLUME; i++) {
-            Object state = denseBlocks[i];
+            S state = getDenseBlock(i);
             if (state != null) {
                 keys[count] = (short) i;
                 values[count] = state;
@@ -300,7 +320,35 @@ public final class CisSection<S> {
         this.sparseKeys = keys;
         this.sparseValues = values;
         this.sparseSize = count;
-        this.denseBlocks = null;
+        this.denseShorts = null;
         this.mode = (count == 0) ? MODE_EMPTY : MODE_SPARSE;
+    }
+
+    /**
+     * Forces this section into dense storage mode immediately.
+     * <p>
+     * Call this before bulk writes to skip the sparse→dense transition
+     * and eliminate all intermediate sparse array allocations.
+     * If already in dense mode, this is a no-op.
+     * </p>
+     */
+    public void ensureDenseMode() {
+        switch (mode) {
+            case MODE_DENSE:
+                return;
+            case MODE_SPARSE:
+                convertToDense();
+                return;
+            case MODE_EMPTY:
+                denseShorts = new short[VOLUME];
+                Arrays.fill(denseShorts, BlockStateRegistry.UNKNOWN_ID);
+                denseCount = 0;
+                mode = MODE_DENSE;
+                break;
+        }
+    }
+
+    public static int getVolume() {
+        return VOLUME;
     }
 }

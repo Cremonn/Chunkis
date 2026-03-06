@@ -36,10 +36,17 @@ public final class CisChunk<S> {
     private CisSection<S> lastSection;
 
     /**
-     * Creates a new empty CisChunk.
+     * Optional global block state registry for optimized Section memory usage.
      */
-    public CisChunk() {
+    private final BlockStateRegistry<S> registry;
+
+    /**
+     * Creates a new empty CisChunk with a global registry.
+     * Sections will use short[] arrays instead of Object[] for memory efficiency.
+     */
+    public CisChunk(BlockStateRegistry<S> registry) {
         this.sections = new Int2ObjectOpenHashMap<>();
+        this.registry = registry;
     }
 
     /**
@@ -61,7 +68,8 @@ public final class CisChunk<S> {
         } else {
             section = sections.get(sectionY);
             if (section == null) {
-                section = new CisSection<>();
+                section = new CisSection<>(registry);
+                section.ensureDenseMode();
                 this.sections.put(sectionY, section);
             }
             lastSectionY = sectionY;

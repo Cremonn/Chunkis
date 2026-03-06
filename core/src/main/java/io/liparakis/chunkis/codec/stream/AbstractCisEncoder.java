@@ -1,15 +1,11 @@
 package io.liparakis.chunkis.codec.stream;
 
-import io.liparakis.chunkis.model.BlockInstruction;
-import io.liparakis.chunkis.model.ChunkDelta;
-import io.liparakis.chunkis.model.Palette;
+import io.liparakis.chunkis.model.*;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
 import io.liparakis.chunkis.codec.interfaces.BitWriter;
 import io.liparakis.chunkis.codec.ArrayBitWriter;
-import io.liparakis.chunkis.model.CisChunk;
 import io.liparakis.chunkis.storage.CisConstants;
-import io.liparakis.chunkis.model.CisSection;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
@@ -32,7 +28,9 @@ import java.util.List;
  */
 public abstract class AbstractCisEncoder<S, N> {
 
-    /** Total number of blocks in a chunk section (16x16x16). */
+    /**
+     * Total number of blocks in a chunk section (16x16x16).
+     */
     protected static final int SECTION_VOLUME = 4096;
 
     protected final BlockStateAdapter<?, S, ?> stateAdapter;
@@ -83,7 +81,10 @@ public abstract class AbstractCisEncoder<S, N> {
      * Converts a ChunkDelta to a CisChunk for efficient spatial access.
      */
     private CisChunk<S> fromDelta(ChunkDelta<S, N> delta) {
-        CisChunk<S> chunk = new CisChunk<>();
+        BlockStateRegistry<S> dummyRegistry = new BlockStateRegistry<>(airState);
+        dummyRegistry.populate(delta.getBlockPalette().getAll());
+
+        CisChunk<S> chunk = new CisChunk<>(dummyRegistry);
         Palette<S> palette = delta.getBlockPalette();
 
         for (BlockInstruction ins : delta.getBlockInstructions()) {
@@ -110,8 +111,8 @@ public abstract class AbstractCisEncoder<S, N> {
                     uniqueStates.put(state, 0);
                 }
             } else if (section.mode == CisSection.MODE_DENSE) {
-                for (Object o : section.denseBlocks) {
-                    S state = (S) o;
+                for (int i = 0; i < CisSection.getVolume(); i++) {
+                    S state = section.getDenseBlock(i);
                     if (state != null && !stateAdapter.isAir(state)) {
                         uniqueStates.put(state, 0);
                     }
@@ -234,7 +235,7 @@ public abstract class AbstractCisEncoder<S, N> {
         ctx.fastLocalPaletteIndex.defaultReturnValue(-1);
         ctx.localPalette.clear();
 
-        buildLocalPalette(ctx, section.denseBlocks);
+        buildLocalPalette(ctx, section);
 
         ensureAirInPalette(ctx);
         int localSize = ctx.localPalette.size();
@@ -249,14 +250,13 @@ public abstract class AbstractCisEncoder<S, N> {
         // Add +1 to localSize because index 0 is reserved for 'null' (no change)
         int bitsPerBlock = calculateBitsNeeded(localSize + 1);
         if (bitsPerBlock > 0) {
-            writeBlockData(ctx, section.denseBlocks, bitsPerBlock);
+            writeBlockData(ctx, section, bitsPerBlock);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    protected void buildLocalPalette(EncoderContext<S> ctx, Object[] states) {
+    protected void buildLocalPalette(EncoderContext<S> ctx, CisSection<S> section) {
         for (int i = 0; i < SECTION_VOLUME; i++) {
-            S state = (S) states[i];
+            S state = section.getDenseBlock(i);
             if (state != null && !ctx.fastLocalPaletteIndex.containsKey(state)) {
                 int globalIdx = ctx.globalIdMap.getInt(state);
                 if (globalIdx != -1) {
@@ -286,10 +286,9 @@ public abstract class AbstractCisEncoder<S, N> {
     /**
      * write the block data for a dense section.
      */
-    @SuppressWarnings("unchecked")
-    private void writeBlockData(EncoderContext<S> ctx, Object[] states, int bitsPerBlock) {
+    private void writeBlockData(EncoderContext<S> ctx, CisSection<S> section, int bitsPerBlock) {
         for (int i = 0; i < SECTION_VOLUME; i++) {
-            S state = (S) states[i];
+            S state = section.getDenseBlock(i);
 
             // local index 0 means "no change" (null)
             // local index 1..N means the block was explicitly modified to the state in the
