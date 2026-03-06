@@ -123,7 +123,7 @@ public final class ChunkDelta<S, N> {
      * @param expectedSize expected number of block changes
      */
     public ChunkDelta(Predicate<S> isEmptyState, int expectedSize) {
-        int capacity = Math.max(INITIAL_CAPACITY, Integer.highestOneBit(expectedSize - 1) << 1);
+        int capacity = Math.max(INITIAL_CAPACITY, expectedSize);
         this.packedInstructions = new long[capacity];
         this.instructionCount = 0;
         this.blockPalette = new Palette<>(expectedSize);

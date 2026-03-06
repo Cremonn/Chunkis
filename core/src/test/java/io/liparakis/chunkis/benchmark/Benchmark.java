@@ -105,6 +105,9 @@ public final class Benchmark {
         long wallEnd = System.nanoTime();
         long cpuAfter = threadCpuTime(threadId);
 
+        // Force GC before final measurement so pure garbage isn't counted as retained
+        // heap
+        forceGc();
         long ramAfter = usedHeapBytes();
 
         // --- Aggregate ---

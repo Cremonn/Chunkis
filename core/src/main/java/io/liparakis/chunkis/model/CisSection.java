@@ -143,8 +143,8 @@ public final class CisSection<S> {
      */
     private void setBlockDense(short key, S state, boolean isAir) {
         int index = key & COORD_MASK;
-        S old = getDenseBlock(index);
-        boolean wasAir = isAirOrNull(old);
+        short oldId = denseShorts[index];
+        boolean wasAir = (oldId == BlockStateRegistry.UNKNOWN_ID);
 
         if (isAir) {
             if (!wasAir) {

@@ -53,7 +53,6 @@ class CoreBenchmarkTest {
     }
 
     // ─── CisSection benchmarks ───────────────────────────────────────────────
-
     /**
      * Fills a single {@link CisSection} from empty → sparse → dense in one pass.
      * This exercises the sparse-to-dense conversion path.
@@ -231,7 +230,7 @@ class CoreBenchmarkTest {
     void bench_chunkDelta_visitor() {
         ChunkDelta<String, String> delta = new ChunkDelta<>(s -> s.equals("air"));
         for (int i = 0; i < 5_000; i++) {
-            int x = i & 0xF, y = (i / 16) & 0xFF, z = (i >> 8) & 0xF;
+            int x = i & 0xF, z = (i >> 4) & 0xF, y = i >> 8;
             delta.addBlockChange(x, y, z, BLOCK_TYPES[i % BLOCK_TYPES.length]);
             if (i % 50 == 0) {
                 delta.addBlockEntityData(x, y, z, "{tile:chest,items:[]}");
