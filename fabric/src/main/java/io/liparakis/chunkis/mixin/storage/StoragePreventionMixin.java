@@ -60,7 +60,7 @@ public class StoragePreventionMixin {
      * storage. Note: vanilla tools that read {@code .mca} files (NBT editors,
      * region viewers) will not see chunk data while this mixin is active.
      *
-     * @param position the chunk position attempting to be written
+     * @param pos the chunk position attempting to be written
      * @param nbt      the NBT data (discarded — operation is cancelled)
      * @param ci       mixin callback used to cancel the operation
      */
@@ -69,11 +69,11 @@ public class StoragePreventionMixin {
             at = @At("HEAD"),
             cancellable = true)
     private void chunkis$blockWrite(
-            final ChunkPos position,
+            final ChunkPos pos,
             final NbtCompound nbt,
             final CallbackInfo ci) {
 
-        logTrace("Blocking vanilla chunk write for {}", position);
+        logTrace("Blocking vanilla chunk write for {}", pos);
         ci.cancel();
     }
 
@@ -90,7 +90,7 @@ public class StoragePreventionMixin {
      * worldgen. {@code ThreadedAnvilChunkStorageMixin} intercepts that path and
      * provides CIS-backed NBT instead.
      *
-     * @param position the chunk position attempting to be read
+     * @param pos the chunk position attempting to be read
      * @param cir      callback whose return value is set to null
      */
     @Inject(
@@ -98,10 +98,10 @@ public class StoragePreventionMixin {
             at = @At("HEAD"),
             cancellable = true)
     private void chunkis$blockGetTagAt(
-            final ChunkPos position,
+            final ChunkPos pos,
             final CallbackInfoReturnable<NbtCompound> cir) {
 
-        logTrace("Blocking vanilla chunk read for {}", position);
+        logTrace("Blocking vanilla chunk read for {}", pos);
         cir.setReturnValue(null);
     }
 
@@ -117,7 +117,7 @@ public class StoragePreventionMixin {
      * do not exist in the region file format. May produce warnings during world
      * upgrades or {@code /data} commands.
      *
-     * @param position the chunk position attempting to be scanned
+     * @param chunkPos the chunk position attempting to be scanned
      * @param scanner  the NBT scanner (discarded — operation is cancelled)
      * @param ci       mixin callback used to cancel the operation
      */
@@ -126,11 +126,11 @@ public class StoragePreventionMixin {
             at = @At("HEAD"),
             cancellable = true)
     private void chunkis$blockScanChunk(
-            final ChunkPos position,
+            final ChunkPos chunkPos,
             final NbtScanner scanner,
             final CallbackInfo ci) {
 
-        logTrace("Blocking vanilla chunk scan for {}", position);
+        logTrace("Blocking vanilla chunk scan for {}", chunkPos);
         ci.cancel();
     }
 

@@ -1,14 +1,18 @@
 plugins {
-    id 'java-library'
-    id 'maven-publish'
-    id 'jacoco'
+    id("java-library")
+    id("maven-publish")
+    id("jacoco")
 }
 
-version = project.property('mod_version')
-group = project.property('maven_group')
+def modVersion = providers.gradleProperty("mod_version").get()
+def mavenGroup = providers.gradleProperty("maven_group").get()
+def archivesBaseName = providers.gradleProperty("archives_base_name").get()
+
+version = modVersion
+group = mavenGroup
 
 base {
-    archivesName = "${project.property('archives_base_name')}-core"
+    archivesName = "${archivesBaseName}-core"
 }
 
 repositories {
@@ -24,7 +28,7 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testImplementation 'org.mockito:mockito-core:5.7.0'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.7.0'
-    testImplementation 'org.assertj:assertj-core:3.24.2'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
@@ -41,10 +45,10 @@ tasks.withType(JavaCompile).configureEach {
 
 test {
     useJUnitPlatform()
-    finalizedBy jacocoTestReport
+    finalizedBy(tasks.named("jacocoTestReport"))
 }
 
-jacocoTestReport {
+tasks.named("jacocoTestReport") {
     dependsOn test
     reports {
         xml.required = true
@@ -58,7 +62,7 @@ jacoco {
 
 publishing {
     publications {
-        mavenJava(MavenPublication) {
+        register("mavenJava", MavenPublication) {
             from components.java
         }
     }
