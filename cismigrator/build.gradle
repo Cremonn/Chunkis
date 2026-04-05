@@ -1,0 +1,42 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group   = project.property('maven_group')
+version = project.property('mod_version')
+
+base {
+    archivesName = "${project.property('archives_base_name')}-cismigrator"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api             'io.liparakis.chunkis:chunkis-core:2.1.0'
+    implementation  'org.slf4j:slf4j-api:2.0.9'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testRuntimeOnly    'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}
