@@ -5,24 +5,16 @@ import io.liparakis.chunkis.core.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;
-import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
-
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.UUID;
 
 /**
  * Utility for restoring chunks from Chunkis delta data.
@@ -89,7 +81,6 @@ public final class ChunkRestorer {
             final VanillaChunkSnapshot snapshot) {
 
         final RestorationVisitor visitor = new RestorationVisitor(world, chunk, runtimeDelta, snapshot);
-        visitor.cleanupReplayedEntities(protoDelta);
         protoDelta.accept(visitor);
         visitor.finishRestoration();
         return visitor.wasOptimized;
@@ -185,45 +176,6 @@ public final class ChunkRestorer {
             this.chunkPosition = chunk.getPos();
             this.runtimeDelta = runtimeDelta;
             this.snapshot = snapshot;
-        }
-
-        /**
-         * Removes replay-generated non-player entities from restored chunks before
-         * Chunkis reapplies the saved entity list.
-         *
-         * <p>This keeps terrain regeneration intact while preventing one-time
-         * structure or passive population side effects from stacking on top of the
-         * entities already persisted in the delta.</p>
-         *
-         * @param sourceDelta loaded persisted delta for the chunk
-         */
-        void cleanupReplayedEntities(final ChunkDelta<BlockState, NbtCompound> sourceDelta) {
-            if (sourceDelta == null || !sourceDelta.shouldSuppressInitialRepopulation()) {
-                return;
-            }
-
-            final Set<UUID> allowedUuids = collectPersistedEntityUuids(sourceDelta.getEntitiesList());
-            final List<Entity> liveEntities = world.getOtherEntities(
-                    null,
-                    new Box(
-                            chunkPosition.getStartX(),
-                            world.getBottomY(),
-                            chunkPosition.getStartZ(),
-                            chunkPosition.getEndX() + 1,
-                            world.getTopY(),
-                            chunkPosition.getEndZ() + 1));
-
-            for (final Entity entity : liveEntities) {
-                if (entity instanceof PlayerEntity) {
-                    continue;
-                }
-
-                if (allowedUuids.contains(entity.getUuid())) {
-                    continue;
-                }
-
-                entity.discard();
-            }
         }
 
         // -------------------------------------------------------------------------
@@ -458,24 +410,6 @@ public final class ChunkRestorer {
          */
         private boolean isEntityAlreadySpawned(final java.util.UUID uuid) {
             return world.getEntity(uuid) != null;
-        }
-
-        /**
-         * Extracts all valid entity UUIDs from the persisted entity payload list.
-         *
-         * @param entities persisted entity NBT payloads
-         * @return UUID allowlist for entities that should remain after cleanup
-         */
-        private Set<UUID> collectPersistedEntityUuids(final List<NbtCompound> entities) {
-            final Set<UUID> uuids = new HashSet<>();
-
-            for (final NbtCompound nbt : entities) {
-                if (nbt != null && nbt.containsUuid("UUID")) {
-                    uuids.add(nbt.getUuid("UUID"));
-                }
-            }
-
-            return uuids;
         }
     }
 }

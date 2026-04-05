@@ -11,6 +11,5 @@ pluginManagement {
 
 rootProject.name = 'Chunkis'
 
-includeBuild 'core'
-includeBuild 'cismigrator'
-includeBuild 'fabric'
+include 'core'
+include 'fabric'

@@ -354,7 +354,6 @@ public class WorldChunkMixin {
             final ChunkDelta<BlockState, NbtCompound> protoDelta) {
 
         final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
-        selfDelta.setSuppressInitialRepopulation(protoDelta.shouldSuppressInitialRepopulation());
 
         try {
             chunkis$isRestoring = true;

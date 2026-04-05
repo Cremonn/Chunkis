@@ -1,7 +1,6 @@
 package io.liparakis.chunkis;
 
 import io.liparakis.chunkis.command.MigrationCommand;
-import io.liparakis.chunkis.util.CisWorldMigrator;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import io.liparakis.chunkis.util.McaMigrator;
@@ -46,10 +45,7 @@ public class ChunkisMod implements ModInitializer {
 
     private void registerEvents() {
         ServerWorldEvents.LOAD
-                .register((server, world) -> {
-                    McaMigrator.migrateWorld(world);
-                    CisWorldMigrator.migrateWorld(world);
-                });
+                .register((server, world) -> McaMigrator.migrateWorld(world));
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> GlobalChunkTracker.clear());
     }
 

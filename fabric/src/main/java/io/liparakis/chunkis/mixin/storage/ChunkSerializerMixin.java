@@ -66,7 +66,7 @@ public class ChunkSerializerMixin {
         final ProtoChunk chunk = cir.getReturnValue();
         if (chunk == null) return;
 
-        restoreChunkDelta(world, pos, nbt, chunk);
+        restoreChunkDelta(world, pos, chunk);
     }
 
     // -------------------------------------------------------------------------
@@ -85,12 +85,14 @@ public class ChunkSerializerMixin {
     private static void restoreChunkDelta(
             final ServerWorld world,
             final ChunkPos pos,
-            final NbtCompound nbt,
             final ProtoChunk chunk) {
 
         final ChunkDelta<?, ?> delta = loadDelta(pos, world);
         if (isDeltaAbsent(delta)) return;
-        delta.setSuppressInitialRepopulation(CisNbtUtil.shouldSuppressInitialRepopulation(nbt, delta));
+
+        if (delta.needsMigration()) {
+            GlobalChunkTracker.addDelta(pos, delta);
+        }
 
         attachDeltaToChunk(chunk, delta);
         resetChunkStatus(chunk);

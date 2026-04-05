@@ -106,7 +106,7 @@ public class SpawnHelperMixin {
             return false;
         }
         final ChunkDelta<?, ?> delta = deltaDuck.chunkis$getDelta();
-        if (delta == null || !delta.shouldSuppressInitialRepopulation()) {
+        if (delta == null || delta.isEmpty()) {
             return false;
         }
         ci.cancel();

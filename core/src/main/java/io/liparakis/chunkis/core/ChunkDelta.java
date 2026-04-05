@@ -7,12 +7,10 @@ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
-import io.liparakis.chunkis.storage.CisConstants;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.function.Predicate;
 
 /**
@@ -78,26 +76,15 @@ public final class ChunkDelta<S, N> {
     private List<N> pendingEntities;
 
     /**
-     * Chunk-level metadata needed to rebuild deterministic worldgen state
-     * correctly on reload, such as structure starts/references.
-     */
-    private N chunkMetadata;
-
-    /**
      * Tracks whether this delta has unsaved changes
      */
     private boolean isDirty;
 
-        /**
-     * CIS format version this delta was last decoded from.
-     */
-    private int sourceVersion;
-
     /**
-     * Marks that this chunk has already gone through its first-worldgen pass and
-     * should suppress one-time repopulation side effects on restored loads.
+     * Tracks whether this delta was loaded from an older CIS version
+     * and should be re-saved in the current version.
      */
-    private boolean suppressInitialRepopulation;
+    private boolean needsMigration;
 
     private final Predicate<S> isEmptyState;
 
@@ -115,10 +102,8 @@ public final class ChunkDelta<S, N> {
         this.positionMap.defaultReturnValue(-1);
         this.activeEntities = new Int2ObjectOpenHashMap<>();
         this.pendingEntities = new ArrayList<>();
-        this.chunkMetadata = null;
         this.isDirty = false;
-        this.sourceVersion = CisConstants.VERSION;
-        this.suppressInitialRepopulation = false;
+        this.needsMigration = false;
         this.isEmptyState = isEmptyState;
     }
 
@@ -399,44 +384,6 @@ public final class ChunkDelta<S, N> {
         }
     }
 
-    // ==================== Chunk Metadata ====================
-
-    /**
-     * Retrieves the chunk-level metadata tag.
-     *
-     * @return The metadata as an NBT-like object, or {@code null} if not set.
-     */
-    public N getChunkMetadata() {
-        return chunkMetadata;
-    }
-
-    /**
-     * Sets the chunk-level metadata and marks this delta as dirty.
-     *
-     * @param metadata The new metadata to store.
-     */
-    public void setChunkMetadata(N metadata) {
-        setChunkMetadata(metadata, true);
-    }
-
-    /**
-     * Updates the chunk-level metadata, optionally marking the delta as dirty.
-     *
-     * @param metadata  The new metadata to store.
-     * @param markDirty Whether to mark the delta as dirty if the metadata changed.
-     */
-    public void setChunkMetadata(N metadata, boolean markDirty) {
-        if (Objects.equals(this.chunkMetadata, metadata)) {
-            return;
-        }
-
-        this.chunkMetadata = metadata;
-
-        if (markDirty) {
-            this.isDirty = true;
-        }
-    }
-
     // ==================== Queries ====================
 
     public synchronized List<BlockInstruction> getBlockInstructions() {
@@ -455,8 +402,7 @@ public final class ChunkDelta<S, N> {
         return instructionCount == 0
                 && (blockEntities == null || blockEntities.isEmpty())
                 && activeEntities.isEmpty()
-                && pendingEntities.isEmpty()
-                && chunkMetadata == null;
+                && pendingEntities.isEmpty();
     }
 
     // ==================== Dirty Flag ====================
@@ -471,46 +417,15 @@ public final class ChunkDelta<S, N> {
 
     public void markSaved() {
         this.isDirty = false;
+        this.needsMigration = false;
     }
 
-    /**
-     * Returns the CIS format version this delta was decoded from.
-     *
-     * @return source CIS version associated with the loaded data
-     */
-    public int getSourceVersion() {
-        return sourceVersion;
+    public boolean needsMigration() {
+        return needsMigration;
     }
 
-    /**
-     * Records the CIS format version this delta originated from.
-     *
-     * @param sourceVersion decoded source format version
-     */
-    public void setSourceVersion(int sourceVersion) {
-        this.sourceVersion = sourceVersion;
-    }
-
-    /**
-     * Returns whether restored loads for this chunk should suppress one-time
-     * vanilla repopulation work such as initial passive or structure-linked
-     * entity deployment.
-     *
-     * @return {@code true} if restored loads should suppress repopulation
-     */
-    public boolean shouldSuppressInitialRepopulation() {
-        return suppressInitialRepopulation;
-    }
-
-    /**
-     * Sets whether restored loads for this chunk should suppress one-time
-     * vanilla repopulation work.
-     *
-     * @param suppressInitialRepopulation {@code true} to suppress replayed
-     *                                    repopulation side effects
-     */
-    public void setSuppressInitialRepopulation(final boolean suppressInitialRepopulation) {
-        this.suppressInitialRepopulation = suppressInitialRepopulation;
+    public void setNeedsMigration(boolean needsMigration) {
+        this.needsMigration = needsMigration;
     }
 
     // ==================== Visitor ====================
