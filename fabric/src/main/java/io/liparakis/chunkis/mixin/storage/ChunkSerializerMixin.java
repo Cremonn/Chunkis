@@ -18,17 +18,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * Intercepts {@link SerializedChunk#convert} to restore Chunkis delta data
- * into freshly converted {@link ProtoChunk} instances.
- *
- * <p>
- * Injected at {@code RETURN} so the vanilla conversion path completes first.
- * The delta is loaded via a memory-first, disk-fallback strategy and attached
- * to the proto chunk. The chunk status is then reset to
- * {@link ChunkStatus#EMPTY} so the worldgen pipeline re-runs and applies the
- * delta on top of fresh terrain.
- */
 @Mixin(SerializedChunk.class)
 public class ChunkSerializerMixin {
 
@@ -57,10 +46,6 @@ public class ChunkSerializerMixin {
         final ChunkDelta<?, ?> delta = loadDelta(pos, world);
         if (isDeltaAbsent(delta)) {
             return;
-        }
-
-        if (delta.needsMigration()) {
-            GlobalChunkTracker.addDelta(world, pos, delta);
         }
 
         attachDeltaToChunk(chunk, delta);

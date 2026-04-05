@@ -95,6 +95,7 @@ public final class CisStorage<B, S, P, N> {
             RegionFile regionFile = getRegionFile(pos, true);
             Objects.requireNonNull(regionFile).write(pos, compressedData);
 
+            delta.setSourceVersion(CisConstants.VERSION);
             delta.markSaved();
         } catch (IOException e) {
             io.liparakis.chunkis.Chunkis.LOGGER.error("Failed to save CIS chunk {}", pos, e);
