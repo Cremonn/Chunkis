@@ -152,24 +152,24 @@ public class WorldChunkMixin {
      * new changes.
      *
      * @param world        the server world
-     * @param protoChunk        the ProtoChunk being promoted
+     * @param proto        the ProtoChunk being promoted
      * @param entityLoader the entity loader for the chunk
      * @param ci           callback info
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
     private void chunkis$onConstructFromProto(
             final ServerWorld world,
-            final ProtoChunk protoChunk,
+            final ProtoChunk proto,
             final WorldChunk.EntityLoader entityLoader,
             final CallbackInfo ci) {
 
-        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(protoChunk);
+        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(proto);
 
-        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(protoChunk);
+        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(proto);
         if (protoDelta == null || protoDelta.isEmpty()) {
             return;
         }
-        restoreChunkFromDelta(world, getWorldChunk(), protoChunk, protoDelta);
+        restoreChunkFromDelta(world, getWorldChunk(), proto, protoDelta);
     }
 
     // -----------------------------------------------------------------------

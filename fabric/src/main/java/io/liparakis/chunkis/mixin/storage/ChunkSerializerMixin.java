@@ -48,7 +48,7 @@ public class ChunkSerializerMixin {
      * @param world      the server world context
      * @param poiStorage point of interest storage (unused by this mixin)
      * @param key        storage key for the chunk (unused by this mixin)
-     * @param chunkPos        the chunk position being deserialized
+     * @param pos        the chunk position being deserialized
      * @param nbt        the raw NBT read from storage
      * @param cir        callback holding the deserialized {@link ProtoChunk}
      */
@@ -57,7 +57,7 @@ public class ChunkSerializerMixin {
             final ServerWorld world,
             final PointOfInterestStorage poiStorage,
             final StorageKey key,
-            final ChunkPos chunkPos,
+            final ChunkPos pos,
             final NbtCompound nbt,
             final CallbackInfoReturnable<ProtoChunk> cir) {
 
@@ -66,7 +66,7 @@ public class ChunkSerializerMixin {
         final ProtoChunk chunk = cir.getReturnValue();
         if (chunk == null) return;
 
-        restoreChunkDelta(world, chunkPos, nbt, chunk);
+        restoreChunkDelta(world, pos, nbt, chunk);
     }
 
     // -------------------------------------------------------------------------

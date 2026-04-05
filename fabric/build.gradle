@@ -1,23 +1,13 @@
-import org.gradle.api.tasks.compile.JavaCompile
-
 plugins {
-    id("fabric-loom")
-    id("maven-publish")
+    id 'fabric-loom'
+    id 'maven-publish'
 }
 
-def mavenGroup = providers.gradleProperty("maven_group").get()
-def modVersion = providers.gradleProperty("mod_version").get()
-def archivesBaseName = providers.gradleProperty("archives_base_name").get()
-def minecraftVersion = providers.gradleProperty("minecraft_version").get()
-def yarnMappings = providers.gradleProperty("yarn_mappings").get()
-def loaderVersion = providers.gradleProperty("loader_version").get()
-def fabricVersion = providers.gradleProperty("fabric_version").get()
-
-group = mavenGroup
-version = modVersion
+group   = project.property('maven_group')
+version = project.property('mod_version')
 
 base {
-    archivesName = "${archivesBaseName}-fabric"
+    archivesName = "${project.property('archives_base_name')}-fabric"
 }
 
 java {
@@ -36,19 +26,19 @@ repositories {
 }
 
 dependencies {
-    minecraft("com.mojang:minecraft:${minecraftVersion}")
-    mappings("net.fabricmc:yarn:${yarnMappings}:v2")
+    minecraft        "com.mojang:minecraft:${project.property('minecraft_version')}"
+    mappings         "net.fabricmc:yarn:${project.property('yarn_mappings')}:v2"
 
-    modImplementation("net.fabricmc:fabric-loader:${loaderVersion}")
-    modImplementation("net.fabricmc.fabric-api:fabric-api:${fabricVersion}")
+    modImplementation "net.fabricmc:fabric-loader:${project.property('loader_version')}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.property('fabric_version')}"
 
-    implementation("io.liparakis.chunkis:chunkis-core:2.1.0")
-    include("io.liparakis.chunkis:chunkis-core:2.1.0")
-    implementation("io.liparakis.chunkis:chunkis-cismigrator:1.0.0")
-    include("io.liparakis.chunkis:chunkis-cismigrator:1.0.0")
+    implementation   'io.liparakis.chunkis:chunkis-core:2.1.0'
+    include          'io.liparakis.chunkis:chunkis-core:2.1.0'
+    implementation   'io.liparakis.chunkis:chunkis-cismigrator:2.1.0'
+    include          'io.liparakis.chunkis:chunkis-cismigrator:2.1.0'
 
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testRuntimeOnly    'org.junit.platform:junit-platform-launcher'
 }
 
 fabricApi {
@@ -62,22 +52,20 @@ fabricApi {
 
 sourceSets {
     gametest {
-        resources.srcDir(file("../cismigrator/src/test/resources"))
+        resources.srcDir file('../cismigrator/src/test/resources')
     }
 }
 
 processResources {
-    inputs.property("version", project.version)
-    inputs.property("minecraft_version", minecraftVersion)
-    inputs.property("loader_version", loaderVersion)
-    filteringCharset = "UTF-8"
+    inputs.property 'version',           project.version
+    inputs.property 'minecraft_version', project.property('minecraft_version')
+    inputs.property 'loader_version',    project.property('loader_version')
+    filteringCharset = 'UTF-8'
 
-    filesMatching("fabric.mod.json") {
-        expand([
-            version          : project.version,
-            minecraft_version: minecraftVersion,
-            loader_version   : loaderVersion,
-        ])
+    filesMatching('fabric.mod.json') {
+        expand version:           project.version,
+                minecraft_version: project.property('minecraft_version'),
+                loader_version:    project.property('loader_version')
     }
 }
 
