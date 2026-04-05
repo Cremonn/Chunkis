@@ -8,13 +8,13 @@ This is a disk I/O optimization. It has no effect on FPS, TPS, or gameplay.
 
 ## At a Glance
 
-|                     |                                                           |
-|:--------------------|:----------------------------------------------------------|
-| File size reduction | 90–95% typical for modpacks with player construction      |
-| Performance impact  | Negligible CPU cost during save/load; no rendering impact |
-| Compatibility       | Fabric only                                               |
-| Reversibility       | **Not reversible** — always back up before installing     |
-| Maturity            | Beta; tested on single-player and multiplayer servers     |
+| | |
+| :--- | :--- |
+| File size reduction | 90–95% typical for modpacks with player construction |
+| Performance impact | Negligible CPU cost during save/load; no rendering impact |
+| Compatibility | Fabric only |
+| Reversibility | **Not reversible** — always back up before installing |
+| Maturity | Beta; tested on single-player and multiplayer servers |
 
 ---
 

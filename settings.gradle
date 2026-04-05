@@ -10,5 +10,6 @@ pluginManagement {
 }
 
 rootProject.name = 'Chunkis'
-includeBuild 'core'
-includeBuild 'fabric'
+
+include 'core'
+include 'fabric'
