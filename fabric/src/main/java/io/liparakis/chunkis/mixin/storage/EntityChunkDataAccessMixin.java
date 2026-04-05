@@ -85,7 +85,7 @@ public class EntityChunkDataAccessMixin {
             }
         });
 
-        GlobalChunkTracker.addDelta(pos, delta);
+        GlobalChunkTracker.addDelta(world, pos, delta);
         persistDelta(pos, delta);
     }
 
@@ -117,7 +117,7 @@ public class EntityChunkDataAccessMixin {
     @Unique
     @SuppressWarnings("unchecked")
     private ChunkDelta<BlockState, NbtCompound> getOrCreateDelta(final ChunkPos pos) {
-        final ChunkDelta<?, ?> tracked = GlobalChunkTracker.getDelta(pos);
+        final ChunkDelta<?, ?> tracked = GlobalChunkTracker.getDelta(world, pos);
         if (tracked != null) {
             return (ChunkDelta<BlockState, NbtCompound>) tracked;
         }
