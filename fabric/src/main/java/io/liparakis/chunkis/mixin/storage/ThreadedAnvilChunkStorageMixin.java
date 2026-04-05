@@ -97,7 +97,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
     @SuppressWarnings("unchecked")
     @Unique
     private void forceSaveRemainingDeltas() {
-        final var pending = GlobalChunkTracker.getPendingPositions(world);
+        final var pending = GlobalChunkTracker.getPendingPositions();
         if (pending.isEmpty())
             return;
 
@@ -106,11 +106,11 @@ public abstract class ThreadedAnvilChunkStorageMixin {
 
         for (final ChunkPos pos : pending) {
             final ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker
-                    .getDelta(world, pos);
+                    .getDelta(pos);
 
             if (delta != null && delta.isDirty()) {
                 persistDelta(pos, delta);
-                GlobalChunkTracker.markSaved(world, pos);
+                GlobalChunkTracker.markSaved(pos);
             }
         }
     }
@@ -142,12 +142,12 @@ public abstract class ThreadedAnvilChunkStorageMixin {
         final CisChunkPos cisPos = toCisChunkPos(chunkPos);
 
         ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker
-                .getDelta(world, chunkPos);
+                .getDelta(chunkPos);
 
         if (delta != null) {
             if (delta.isDirty()) {
                 getStorage().save(cisPos, delta);
-                GlobalChunkTracker.markSaved(world, chunkPos);
+                GlobalChunkTracker.markSaved(chunkPos);
             }
         } else {
             delta = getStorage().load(cisPos);
@@ -187,7 +187,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
         final ChunkPos pos = chunkHolder.getPos();
         final Chunk chunk = selectChunkForSaving(chunkHolder);
 
-        ChunkDelta<BlockState, NbtCompound> delta = resolveTrackerDelta(pos, world);
+        ChunkDelta<BlockState, NbtCompound> delta = resolveTrackerDelta(pos);
 
         if (delta == null) {
             delta = resolveChunkDelta(chunk);
@@ -206,7 +206,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
 
         if (delta.isDirty()) {
             persistDelta(pos, delta);
-            GlobalChunkTracker.markSaved(world, pos);
+            GlobalChunkTracker.markSaved(pos);
         }
 
         if (chunk != null) {
@@ -228,10 +228,8 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      */
     @Unique
     @SuppressWarnings("unchecked")
-    private static ChunkDelta<BlockState, NbtCompound> resolveTrackerDelta(
-            final ChunkPos pos,
-            final ServerWorld world) {
-        return (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker.getDelta(world, pos);
+    private static ChunkDelta<BlockState, NbtCompound> resolveTrackerDelta(final ChunkPos pos) {
+        return (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker.getDelta(pos);
     }
 
     /**

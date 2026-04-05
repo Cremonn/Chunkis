@@ -115,7 +115,7 @@ public class ChunkSerializerMixin {
     @Unique
     @SuppressWarnings("rawtypes")
     private static ChunkDelta loadDelta(final ChunkPos pos, final ServerWorld world) {
-        final ChunkDelta fromMemory = loadDeltaFromMemory(pos, world);
+        final ChunkDelta fromMemory = loadDeltaFromMemory(pos);
         if (fromMemory != null) return fromMemory;
         return loadDeltaFromDisk(pos, world);
     }
@@ -128,8 +128,8 @@ public class ChunkSerializerMixin {
      */
     @Unique
     @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos, final ServerWorld world) {
-        final ChunkDelta delta = GlobalChunkTracker.getDelta(world, pos);
+    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos) {
+        final ChunkDelta delta = GlobalChunkTracker.getDelta(pos);
         return (delta != null && !delta.isEmpty()) ? delta : null;
     }
 
