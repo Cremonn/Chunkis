@@ -2,46 +2,66 @@ package io.liparakis.chunkis.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
-import io.liparakis.chunkis.migrator.CisMigrationReport;
-import io.liparakis.chunkis.migrator.CisVersionMap;
-import io.liparakis.chunkis.util.CisWorldMigrator;
+import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.core.CisChunkPos;
+import io.liparakis.chunkis.storage.CisStorage;
+import io.liparakis.chunkis.util.FabricCisStorageHelper;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
+import net.minecraft.util.WorldSavePath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Registers and handles the {@code /chunkis migrate} command.
+ * Command to handle bulk migration of CIS data from older versions (CIS7)
+ * to the latest format (CIS8).
  *
- * <p>Upgrades existing CIS storage from older format versions to the current one
- * using the dedicated {@code cismigrator} project. MCA migration (vanilla → CIS)
- * is handled separately and is unaffected by this command.
+ * <p>
+ * Migration is performed on a dedicated background thread to avoid blocking
+ * the server main thread. Progress and results are reported back via feedback
+ * messages to the command source.
  *
- * <p><b>Threading:</b> Command dispatch occurs on the server main thread.
- * All migration work is offloaded to a dedicated background thread
- * ({@value #MIGRATION_THREAD_NAME}) to avoid blocking the game loop.
- * No world state is mutated off-thread; only CIS storage files are accessed.
+ * <p>
+ * Requires permission level 2 (operator).
+ *
+ * @author Liparakis
+ * @version 1.1
  */
 public final class MigrationCommand {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MigrationCommand.class);
 
-    /** Minimum operator permission level required to execute the migration command. */
+    /** Matches region file names of the form {@code r.<x>.<z>.cis}. */
+    private static final Pattern REGION_FILE_PATTERN = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.cis");
+
+    /** Minimum permission level required to run the migration command. */
     private static final int REQUIRED_PERMISSION_LEVEL = 2;
 
-    /** Name used for the background migration thread, visible in thread dumps. */
-    private static final String MIGRATION_THREAD_NAME = "Chunkis-CIS-Migration-Thread";
+    /** Number of chunks per region axis (32×32 = 1024 chunks per region file). */
+    private static final int REGION_SIZE = 32;
+
+    /** Name of the dedicated migration background thread. */
+    private static final String MIGRATION_THREAD_NAME = "Chunkis-Migration-Thread";
 
     private MigrationCommand() {
         throw new AssertionError("Utility class");
     }
 
+    // -------------------------------------------------------------------------
+    // Registration
+    // -------------------------------------------------------------------------
+
     /**
-     * Registers {@code /chunkis migrate} with the given dispatcher.
+     * Registers the {@code /chunkis migrate} command with the given dispatcher.
      *
      * @param dispatcher the server command dispatcher
      */
@@ -53,136 +73,298 @@ public final class MigrationCommand {
                                 .executes(MigrationCommand::runMigration)));
     }
 
+    // -------------------------------------------------------------------------
+    // Permission
+    // -------------------------------------------------------------------------
+
     /**
-     * Returns whether {@code source} has permission to run the migration command.
+     * Version-independent permission check.
      *
-     * <p>Falls back to operator-list lookup if {@code hasPermissionLevel} throws,
-     * and grants access unconditionally if the server or player cannot be resolved
-     * (e.g. command blocks or the console).
+     * <p>
+     * Tries {@code source.hasPermissionLevel(level)} first. If that throws
+     * (e.g., due to a mapping mismatch), falls back to
+     * {@code PlayerManager.isOperator(GameProfile)}, which is stable across
+     * Minecraft 1.21.x. Returns {@code true} as a last resort to prevent
+     * crashing the server on permission check failure.
      *
      * @param source the command source to check
-     * @return {@code true} if the source may run the command
+     * @return true if the source meets the required level
      */
     private static boolean hasPermission(final ServerCommandSource source) {
         try {
-            return source.hasPermissionLevel(REQUIRED_PERMISSION_LEVEL);
+            return source.hasPermissionLevel(MigrationCommand.REQUIRED_PERMISSION_LEVEL);
         } catch (final Throwable primary) {
-            try {
-                final var server = source.getServer();
-                if (server == null) {
-                    return true;
-                }
-
-                final var player = source.getPlayer();
-                if (player == null) {
-                    return true;
-                }
-
-                return server.getPlayerManager().isOperator(player.getGameProfile());
-            } catch (final Throwable fallbackFailure) {
-                return true;
-            }
+            return hasPermissionFallback(source);
         }
     }
 
     /**
-     * Entry point for the {@code /chunkis migrate} command.
+     * Fallback permission check using
+     * {@code PlayerManager.isOperator(GameProfile)}.
+     * Returns {@code true} if all fallback paths also fail, to avoid a server
+     * crash.
      *
-     * <p>Notifies the invoker of the target version and spawns the background
-     * migration thread. Returns immediately so the main thread is not blocked.
+     * @param source the command source to check
+     * @return true if the player is an operator, or true if the check itself fails
+     */
+    private static boolean hasPermissionFallback(final ServerCommandSource source) {
+        try {
+            final var server = source.getServer();
+            if (server == null)
+                return true;
+
+            final var player = source.getPlayer();
+            if (player == null)
+                return true;
+
+            // isOperator(GameProfile) is stable across 1.21.x PlayerManager
+            return server.getPlayerManager().isOperator(player.getGameProfile());
+        } catch (final Throwable fallbackFailure) {
+            // Return true to prevent crashing the server if permission check is broken
+            return true;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Command entry point
+    // -------------------------------------------------------------------------
+
+    /**
+     * Entry point for {@code /chunkis migrate}. Sends an initial feedback message
+     * and dispatches migration work to a dedicated background thread.
      *
-     * @param context the command execution context
-     * @return {@code 1} on successful dispatch
+     * @param context the command context
+     * @return 1 (command accepted)
      */
     private static int runMigration(final CommandContext<ServerCommandSource> context) {
         final ServerCommandSource source = context.getSource();
-        source.sendFeedback(
-                () -> Text.literal("§6[Chunkis] Starting CIS migration to v" + CisVersionMap.latestVersion() + "..."),
-                true);
+        source.sendFeedback(() -> Text.literal("§6[Chunkis] Starting bulk migration from CIS7 to CIS8..."), true);
 
-        new Thread(() -> executeMigration(source), MIGRATION_THREAD_NAME).start();
+        final Thread migrationThread = new Thread(
+                () -> executeMigration(source),
+                MIGRATION_THREAD_NAME);
+        migrationThread.start();
 
         return 1;
     }
 
     /**
-     * Runs the full multi-world CIS migration and reports aggregate results.
+     * Executes the full migration across all server worlds on the background
+     * thread.
+     * Reports completion or failure back to the command source.
      *
-     * <p><b>Threading:</b> Must only be called from the background migration thread,
-     * never from the server main thread.
-     *
-     * @param source the command source used for feedback messages
+     * @param source the command source to report results to
      */
     private static void executeMigration(final ServerCommandSource source) {
         try {
-            CisMigrationReport total = CisMigrationReport.empty();
-
-            for (final ServerWorld world : source.getServer().getWorlds()) {
-                total = merge(total, migrateWorld(world, source));
-            }
-
-            final CisMigrationReport finalTotal = total;
+            final int totalMigrated = migrateAllWorlds(source);
             source.sendFeedback(
-                    () -> Text.literal("§a[Chunkis] CIS migration complete. Migrated "
-                            + finalTotal.migratedChunks()
-                            + " chunk(s), skipped "
-                            + finalTotal.skippedChunks()
-                            + ", failed "
-                            + finalTotal.failedChunks()
-                            + "."),
+                    () -> Text
+                            .literal("§a[Chunkis] Migration complete! Upgraded " + totalMigrated + " chunks to CIS8."),
                     true);
-
         } catch (final Exception e) {
-            LOGGER.error("CIS migration failed", e);
+            LOGGER.error("Migration failed", e);
             source.sendFeedback(
-                    () -> Text.literal("§c[Chunkis] CIS migration failed. Check server logs for details."),
+                    () -> Text.literal("§c[Chunkis] Migration failed! Check server logs for details."),
                     true);
         }
     }
 
+    // -------------------------------------------------------------------------
+    // World-level migration
+    // -------------------------------------------------------------------------
+
     /**
-     * Migrates CIS storage for a single world dimension and reports per-world results.
+     * Iterates all server worlds and migrates each one.
      *
-     * <p>If the CIS storage directory for the world does not exist, an empty report
-     * is returned immediately without performing any I/O beyond the existence check.
-     *
-     * <p><b>Threading:</b> Called from the background migration thread.
-     *
-     * @param world  the dimension to migrate
-     * @param source the command source used for per-dimension feedback messages
-     * @return a {@link CisMigrationReport} describing the outcome for this dimension
+     * @param source the command source for progress feedback
+     * @return total number of chunks migrated across all worlds
      */
-    private static CisMigrationReport migrateWorld(final ServerWorld world, final ServerCommandSource source) {
-        final String dimId = world.getRegistryKey().getValue().toString();
-        source.sendFeedback(() -> Text.literal("§7Migrating CIS storage for " + dimId + "..."), false);
-
-        if (!Files.exists(CisWorldMigrator.resolveStorageDir(world))) {
-            return CisMigrationReport.empty();
+    private static int migrateAllWorlds(final ServerCommandSource source) {
+        int total = 0;
+        for (final ServerWorld world : source.getServer().getWorlds()) {
+            total += migrateWorld(world, source);
         }
-
-        final CisMigrationReport report = CisWorldMigrator.migrateWorld(world);
-
-        source.sendFeedback(
-                () -> Text.literal("§8" + dimId + ": migrated " + report.migratedChunks()
-                        + ", skipped " + report.skippedChunks()
-                        + ", failed " + report.failedChunks()),
-                false);
-
-        return report;
+        return total;
     }
 
     /**
-     * Combines two {@link CisMigrationReport} instances by summing all counters.
+     * Migrates all CIS7 region files found in the given world's storage directory.
      *
-     * @param left  the accumulator report
-     * @param right the report to merge into {@code left}
-     * @return a new {@link CisMigrationReport} with aggregated counts
+     * @param world  the world to migrate
+     * @param source the command source for progress feedback
+     * @return number of chunks migrated in this world
      */
-    private static CisMigrationReport merge(final CisMigrationReport left, final CisMigrationReport right) {
-        return new CisMigrationReport(
-                left.scannedChunks() + right.scannedChunks(),
-                left.migratedChunks() + right.migratedChunks(),
-                left.skippedChunks() + right.skippedChunks(),
-                left.failedChunks() + right.failedChunks());
+    private static int migrateWorld(final ServerWorld world, final ServerCommandSource source) {
+        final String dimId = world.getRegistryKey().getValue().toString();
+        source.sendFeedback(() -> Text.literal("§7Migrating dimension: " + dimId + "..."), false);
+
+        final Path storageDir = resolveStorageDir(world);
+        if (!Files.exists(storageDir))
+            return 0;
+
+        final CisStorage<?, ?, ?, ?> storage = FabricCisStorageHelper.getStorage(world);
+        return migrateRegionFiles(storage, storageDir, dimId);
+    }
+
+    /**
+     * Scans the given storage directory for region files and migrates each one.
+     *
+     * @param storage    the storage instance to load/save deltas through
+     * @param storageDir the directory to scan for {@code r.*.*.cis} files
+     * @param dimId      the dimension identifier (used only for error logging)
+     * @return number of chunks migrated across all region files in the directory
+     */
+    private static int migrateRegionFiles(
+            final CisStorage<?, ?, ?, ?> storage,
+            final Path storageDir,
+            final String dimId) {
+
+        int migrated = 0;
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(storageDir, "r.*.*.cis")) {
+            for (final Path path : stream) {
+                migrated += migrateRegionFileIfMatched(storage, path);
+            }
+        } catch (final IOException e) {
+            LOGGER.error("Failed to iterate storage directory for {}", dimId, e);
+        }
+
+        return migrated;
+    }
+
+    /**
+     * Parses the region file name and delegates to {@link #migrateRegion} if the
+     * file name matches the expected pattern.
+     *
+     * @param storage the storage instance
+     * @param path    the candidate region file path
+     * @return number of chunks migrated from this file, or 0 if name did not match
+     */
+    private static int migrateRegionFileIfMatched(
+            final CisStorage<?, ?, ?, ?> storage,
+            final Path path) {
+
+        final Matcher matcher = REGION_FILE_PATTERN.matcher(path.getFileName().toString());
+        if (!matcher.matches())
+            return 0;
+
+        final int rx = Integer.parseInt(matcher.group(1));
+        final int rz = Integer.parseInt(matcher.group(2));
+        return migrateRegion(storage, rx, rz);
+    }
+
+    // -------------------------------------------------------------------------
+    // Region-level migration
+    // -------------------------------------------------------------------------
+
+    /**
+     * Iterates all {@value #REGION_SIZE}×{@value #REGION_SIZE} chunk positions
+     * within the given region and migrates any chunk that needs it.
+     *
+     * @param storage the storage instance to load/save deltas through
+     * @param rx      region X coordinate
+     * @param rz      region Z coordinate
+     * @return number of chunks migrated in this region
+     */
+    private static int migrateRegion(final CisStorage<?, ?, ?, ?> storage, final int rx, final int rz) {
+        int migrated = 0;
+        for (int x = 0; x < REGION_SIZE; x++) {
+            for (int z = 0; z < REGION_SIZE; z++) {
+                if (migrateChunk(storage, rx, rz, x, z)) {
+                    migrated++;
+                }
+            }
+        }
+        return migrated;
+    }
+
+    /**
+     * Loads the delta for a single chunk position and re-saves it if migration is
+     * needed.
+     *
+     * <p>
+     * The unchecked raw-type cast on {@code storage.save()} is unavoidable here
+     * because
+     * {@link CisStorage} is parameterized and the wildcard-captured types cannot be
+     * threaded through without changing the public API. The save is safe because
+     * the
+     * delta originated from the same storage instance.
+     *
+     * @param storage the storage instance
+     * @param rx      region X coordinate
+     * @param rz      region Z coordinate
+     * @param x       local chunk X within the region (0–31)
+     * @param z       local chunk Z within the region (0–31)
+     * @return true if this chunk was migrated and saved
+     */
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    private static boolean migrateChunk(
+            final CisStorage<?, ?, ?, ?> storage,
+            final int rx,
+            final int rz,
+            final int x,
+            final int z) {
+
+        final CisChunkPos pos = new CisChunkPos((rx << 5) + x, (rz << 5) + z);
+        final ChunkDelta<?, ?> delta = storage.load(pos);
+
+        if (!requiresMigration(delta))
+            return false;
+
+        ((CisStorage) storage).save(pos, delta);
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Guard predicates
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the given delta is non-null, non-empty, and flagged for
+     * migration.
+     *
+     * @param delta the delta to evaluate, may be null
+     * @return true if the delta should be re-saved in the new format
+     */
+    private static boolean requiresMigration(final ChunkDelta<?, ?> delta) {
+        return delta != null && !delta.isEmpty() && delta.needsMigration();
+    }
+
+    // -------------------------------------------------------------------------
+    // Path resolution
+    // -------------------------------------------------------------------------
+
+    /**
+     * Resolves the CIS region storage directory for the given world.
+     *
+     * <p>
+     * For the overworld, resolves to {@code <save>/chunkis/regions}.
+     * For other dimensions, resolves to
+     * {@code <save>/dimensions/<namespace>/<path>/chunkis/regions}.
+     *
+     * @param world the world whose storage directory to resolve
+     * @return the absolute path to the region storage directory
+     */
+    private static Path resolveStorageDir(final ServerWorld world) {
+        final String dimPath = world.getRegistryKey().getValue().getPath();
+        Path baseDir = world.getServer().getSavePath(WorldSavePath.ROOT);
+
+        if (!isOverworld(dimPath)) {
+            final String namespace = world.getRegistryKey().getValue().getNamespace();
+            baseDir = baseDir.resolve("dimensions").resolve(namespace).resolve(dimPath);
+        }
+
+        return baseDir.resolve("chunkis").resolve("regions");
+    }
+
+    /**
+     * Returns true if the given dimension path corresponds to the overworld.
+     *
+     * @param dimPath the dimension registry path (e.g., "overworld", "the_nether")
+     * @return true if dimPath is "overworld"
+     */
+    private static boolean isOverworld(final String dimPath) {
+        return "overworld".equals(dimPath);
     }
 }

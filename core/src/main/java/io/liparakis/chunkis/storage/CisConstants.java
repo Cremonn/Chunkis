@@ -20,11 +20,10 @@ public final class CisConstants {
 
     /**
      * Current CIS format version.
-     * V9: Adds chunk-level metadata (for example structure starts/references)
-     * so deterministic structure worldgen remains idempotent across reloads.
+     * V8: Increased palette bit width to 12 bits to support 4096 unique blocks.
      * Increment when making breaking changes to the serialization format.
      */
-    public static final int VERSION = 9;
+    public static final int VERSION = 8;
 
     // ==================== Section Geometry ====================
 

@@ -72,7 +72,6 @@ public abstract class AbstractCisEncoder<S, N> {
         writeSections(dos, ctx, chunk);
         writeBlockEntities(dos, delta);
         writeEntities(dos, delta);
-        writeChunkMetadata(dos, delta);
 
         return ctx.mainBuffer.toByteArray();
     }
@@ -182,18 +181,6 @@ public abstract class AbstractCisEncoder<S, N> {
                 nbtAdapter.write(entity, dos);
             }
         }
-    }
-
-    /**
-     * Writes optional chunk-level metadata required to reproduce stable worldgen
-     * behavior, such as structure starts/references.
-     */
-    private void writeChunkMetadata(DataOutputStream dos, ChunkDelta<S, N> delta) throws IOException {
-        final N metadata = delta.getChunkMetadata();
-        dos.writeBoolean(metadata != null);
-
-        if (metadata != null)
-            nbtAdapter.write(metadata, dos);
     }
 
     /**

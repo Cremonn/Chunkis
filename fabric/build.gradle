@@ -20,13 +20,6 @@ base {
     archivesName = "${archivesBaseName}-fabric"
 }
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
-    withSourcesJar()
-}
-
 repositories {
     mavenCentral()
     maven {
@@ -44,26 +37,6 @@ dependencies {
 
     implementation("io.liparakis.chunkis:chunkis-core:2.1.0")
     include("io.liparakis.chunkis:chunkis-core:2.1.0")
-    implementation("io.liparakis.chunkis:chunkis-cismigrator:2.1.0")
-    include("io.liparakis.chunkis:chunkis-cismigrator:2.1.0")
-
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-}
-
-fabricApi {
-    configureTests {
-        createSourceSet = true
-        modId = "chunkis-gametest"
-        enableGameTests = true
-        enableClientGameTests = false
-    }
-}
-
-sourceSets {
-    gametest {
-        resources.srcDir(file("../cismigrator/src/test/resources"))
-    }
 }
 
 processResources {
@@ -81,6 +54,13 @@ processResources {
     }
 }
 
-test {
-    useJUnitPlatform()
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+java {
+    withSourcesJar()
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
