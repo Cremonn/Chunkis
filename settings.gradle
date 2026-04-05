@@ -1,5 +1,5 @@
-rootProject.name = 'Chunkis'
+rootProject.name = "Chunkis"
 
-includeBuild 'core'
-includeBuild 'cismigrator'
-includeBuild 'fabric'
+includeBuild("core")
+includeBuild("cismigrator")
+includeBuild("fabric")
