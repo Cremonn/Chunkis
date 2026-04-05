@@ -130,30 +130,30 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      * base NBT compound (via {@link CisNbtUtil}) and returned immediately —
      * cancelling the vanilla I/O path entirely.
      *
-     * @param pos the chunk position to load
+     * @param chunkPos the chunk position to load
      * @param cir callback whose return value is set to a completed future
      */
     @SuppressWarnings("unchecked")
     @Inject(method = "getUpdatedChunkNbt(Lnet/minecraft/util/math/ChunkPos;)Ljava/util/concurrent/CompletableFuture;", at = @At("HEAD"), cancellable = true)
     private void chunkis$onGetUpdatedChunkNbt(
-            final ChunkPos pos,
+            final ChunkPos chunkPos,
             final CallbackInfoReturnable<CompletableFuture<Optional<NbtCompound>>> cir) {
 
-        final CisChunkPos cisPos = toCisChunkPos(pos);
+        final CisChunkPos cisPos = toCisChunkPos(chunkPos);
 
         ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker
-                .getDelta(pos);
+                .getDelta(chunkPos);
 
         if (delta != null) {
             if (delta.isDirty()) {
                 getStorage().save(cisPos, delta);
-                GlobalChunkTracker.markSaved(pos);
+                GlobalChunkTracker.markSaved(chunkPos);
             }
         } else {
             delta = getStorage().load(cisPos);
         }
 
-        cir.setReturnValue(CompletableFuture.completedFuture(Optional.of(buildChunkNbt(pos, delta))));
+        cir.setReturnValue(CompletableFuture.completedFuture(Optional.of(buildChunkNbt(chunkPos, delta))));
     }
 
     // -------------------------------------------------------------------------
@@ -192,6 +192,8 @@ public abstract class ThreadedAnvilChunkStorageMixin {
         if (delta == null) {
             delta = resolveChunkDelta(chunk);
         }
+
+        delta = captureStructureMetadata(chunk, delta);
 
         if (delta == null) {
             // No modifications — cancel vanilla save (StoragePreventionMixin would
@@ -315,8 +317,34 @@ public abstract class ThreadedAnvilChunkStorageMixin {
             final ChunkDelta<BlockState, NbtCompound> delta) {
 
         final NbtCompound nbt = CisNbtUtil.createBaseNbt(pos, GAME_DATA_VERSION);
+        CisNbtUtil.putChunkMetadata(nbt, delta);
         CisNbtUtil.putDelta(nbt, delta);
         return nbt;
+    }
+
+    /**
+     * Captures serialized structure metadata for the chunk so structure starts and
+     * references survive Chunkis' regenerate-on-load cycle.
+     */
+    @Unique
+    private ChunkDelta<BlockState, NbtCompound> captureStructureMetadata(
+            final Chunk chunk,
+            final ChunkDelta<BlockState, NbtCompound> existingDelta) {
+
+        if (chunk == null) {
+            return existingDelta;
+        }
+
+        final NbtCompound serializedChunk = net.minecraft.world.ChunkSerializer.serialize(world, chunk);
+        final NbtCompound structureData = CisNbtUtil.extractStructureData(serializedChunk);
+        if (existingDelta == null && structureData == null) {
+            return null;
+        }
+
+        final ChunkDelta<BlockState, NbtCompound> delta = existingDelta != null ? existingDelta : new ChunkDelta<>();
+        delta.setSuppressInitialRepopulation(true);
+        delta.setChunkMetadata(CisNbtUtil.createChunkMetadata(structureData, true));
+        return delta;
     }
 
     /**

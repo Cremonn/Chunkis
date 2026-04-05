@@ -3,52 +3,72 @@ plugins {
     id 'maven-publish'
 }
 
+group   = project.property('maven_group')
 version = project.property('mod_version')
-group = project.property('maven_group')
 
 base {
     archivesName = "${project.property('archives_base_name')}-fabric"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
 }
 
 repositories {
     mavenCentral()
     maven {
         name = 'Fabric'
-        url = 'https://maven.fabricmc.net/'
+        url  = 'https://maven.fabricmc.net/'
     }
 }
 
 dependencies {
-    implementation project(path: ":core", configuration: "namedElements")
-    include project(":core")  // Bundle core into JAR
-    
-    minecraft "com.mojang:minecraft:${project.property('minecraft_version')}"
-    mappings "net.fabricmc:yarn:${project.property('yarn_mappings')}:v2"
+    minecraft        "com.mojang:minecraft:${project.property('minecraft_version')}"
+    mappings         "net.fabricmc:yarn:${project.property('yarn_mappings')}:v2"
 
     modImplementation "net.fabricmc:fabric-loader:${project.property('loader_version')}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.property('fabric_version')}"
+
+    implementation   'io.liparakis.chunkis:chunkis-core:2.1.0'
+    include          'io.liparakis.chunkis:chunkis-core:2.1.0'
+    implementation   'io.liparakis.chunkis:chunkis-cismigrator:2.1.0'
+    include          'io.liparakis.chunkis:chunkis-cismigrator:2.1.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testRuntimeOnly    'org.junit.platform:junit-platform-launcher'
+}
+
+fabricApi {
+    configureTests {
+        createSourceSet        = true
+        modId                  = "chunkis-gametest"
+        enableGameTests        = true
+        enableClientGameTests  = false
+    }
+}
+
+sourceSets {
+    gametest {
+        resources.srcDir file('../cismigrator/src/test/resources')
+    }
 }
 
 processResources {
-    inputs.property "version", project.version
-    inputs.property "minecraft_version", project.property('minecraft_version')
-    inputs.property "loader_version", project.property('loader_version')
-    filteringCharset = "UTF-8"
+    inputs.property 'version',           project.version
+    inputs.property 'minecraft_version', project.property('minecraft_version')
+    inputs.property 'loader_version',    project.property('loader_version')
+    filteringCharset = 'UTF-8'
 
-    filesMatching("fabric.mod.json") {
-        expand "version": project.version,
-               "minecraft_version": project.property('minecraft_version'),
-               "loader_version": project.property('loader_version')
+    filesMatching('fabric.mod.json') {
+        expand version:           project.version,
+                minecraft_version: project.property('minecraft_version'),
+                loader_version:    project.property('loader_version')
     }
 }
 
-tasks.withType(JavaCompile).configureEach {
-    options.release = 21
-}
-
-java {
-    withSourcesJar()
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
+test {
+    useJUnitPlatform()
 }
