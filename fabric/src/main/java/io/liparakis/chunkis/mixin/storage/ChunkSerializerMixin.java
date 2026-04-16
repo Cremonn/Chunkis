@@ -3,8 +3,10 @@ package io.liparakis.chunkis.mixin.storage;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.CisChunkPos;
+import io.liparakis.chunkis.util.CisNbtUtil;
 import io.liparakis.chunkis.util.FabricCisStorageHelper;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkStatus;
@@ -28,9 +30,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * to the proto chunk. The chunk status is then reset to
  * {@link ChunkStatus#EMPTY} so the worldgen pipeline re-runs and applies the
  * delta on top of fresh terrain.
- *
- * @author Liparakis
- * @version 1.2
  */
 @Mixin(SerializedChunk.class)
 public class ChunkSerializerMixin {
@@ -46,7 +45,7 @@ public class ChunkSerializerMixin {
      * @param world       the server world context
      * @param poiStorage  point of interest storage (unused by this mixin)
      * @param key         storage key for the chunk (unused by this mixin)
-     * @param expectedPos the expected chunk position
+     * @param chunkPos        the chunk position being converted
      * @param cir         callback holding the converted {@link ProtoChunk}
      */
     @Inject(method = "convert", at = @At("RETURN"))
@@ -54,14 +53,13 @@ public class ChunkSerializerMixin {
             final ServerWorld world,
             final PointOfInterestStorage poiStorage,
             final StorageKey key,
-            final ChunkPos expectedPos,
+            final ChunkPos chunkPos,
             final CallbackInfoReturnable<ProtoChunk> cir) {
 
         final ProtoChunk chunk = cir.getReturnValue();
-        if (chunk == null)
-            return;
+        if (chunk == null) return;
 
-        restoreChunkDelta(world, chunk.getPos(), chunk);
+        restoreChunkDelta(world, chunkPos, chunk);
     }
 
     // -------------------------------------------------------------------------
@@ -83,28 +81,20 @@ public class ChunkSerializerMixin {
             final ProtoChunk chunk) {
 
         final ChunkDelta<?, ?> delta = loadDelta(pos, world);
-        if (isDeltaAbsent(delta))
-            return;
-
-        if (delta.needsMigration()) {
-            GlobalChunkTracker.addDelta(pos, delta);
-        }
-
+        if (isDeltaAbsent(delta)) return;
+        delta.setSuppressInitialRepopulation(resolveSuppressInitialRepopulation(delta));
         attachDeltaToChunk(chunk, delta);
         resetChunkStatus(chunk);
     }
 
     // -------------------------------------------------------------------------
-    // Delta loading — memory-first, disk-fallback
+    // Delta loading - memory-first, disk-fallback
     // -------------------------------------------------------------------------
 
     /**
      * Loads the delta for the given chunk position using a two-tier strategy:
-     * <ol>
-     * <li>In-memory {@link GlobalChunkTracker} — catches deltas modified since
-     * the last disk flush.</li>
-     * <li>Persistent CIS storage — disk fallback for cold loads.</li>
-     * </ol>
+     * memory-first from {@link GlobalChunkTracker}, then disk fallback from CIS
+     * storage for cold loads.
      *
      * @param pos   the chunk position
      * @param world the server world (for disk storage access)
@@ -113,22 +103,22 @@ public class ChunkSerializerMixin {
     @Unique
     @SuppressWarnings("rawtypes")
     private static ChunkDelta loadDelta(final ChunkPos pos, final ServerWorld world) {
-        final ChunkDelta fromMemory = loadDeltaFromMemory(pos);
-        if (fromMemory != null)
-            return fromMemory;
+        final ChunkDelta fromMemory = loadDeltaFromMemory(pos, world);
+        if (fromMemory != null) return fromMemory;
         return loadDeltaFromDisk(pos, world);
     }
 
     /**
      * Returns a non-empty delta from the in-memory tracker, or null.
      *
-     * @param pos the chunk position
+     * @param pos   the chunk position
+     * @param world the server world used to scope tracker access
      * @return the in-memory delta, or null if absent or empty
      */
     @Unique
     @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos) {
-        final ChunkDelta delta = GlobalChunkTracker.getDelta(pos);
+    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos, final ServerWorld world) {
+        final ChunkDelta delta = GlobalChunkTracker.getDelta(world, pos);
         return (delta != null && !delta.isEmpty()) ? delta : null;
     }
 
@@ -173,6 +163,22 @@ public class ChunkSerializerMixin {
     @Unique
     private static void resetChunkStatus(final ProtoChunk chunk) {
         chunk.setStatus(ChunkStatus.EMPTY);
+    }
+
+    /**
+     * Recreates the old deserializer-based suppression decision using the
+     * information still available at the {@code convert(...)} hook.
+     *
+     * @param delta the loaded chunk delta
+     * @return true if replay-time repopulation should be suppressed
+     */
+    @Unique
+    private static boolean resolveSuppressInitialRepopulation(final ChunkDelta<?, ?> delta) {
+        final NbtCompound root = new NbtCompound();
+        final NbtCompound chunkisData = new NbtCompound();
+        chunkisData.putBoolean(CisNbtUtil.HAS_DELTA_KEY, true);
+        root.put(CisNbtUtil.CHUNKIS_DATA_KEY, chunkisData);
+        return CisNbtUtil.shouldSuppressInitialRepopulation(root, delta);
     }
 
     // -------------------------------------------------------------------------

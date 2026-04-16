@@ -2,11 +2,14 @@ package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.World;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -19,7 +22,7 @@ import java.util.stream.Collectors;
  * <ul>
  * <li><b>Dirty delta map:</b> Strong references to deltas for all actively
  * dirty chunks.
- * Entries are removed via {@link #markSaved(ChunkPos)} after a successful disk
+ * Entries are removed via {@link #markSaved(World, ChunkPos)} after a successful disk
  * write.</li>
  * <li><b>Unload cache:</b> Size-limited LRU cache ({@value #MAX_CACHE_SIZE}
  * entries) that
@@ -40,9 +43,8 @@ import java.util.stream.Collectors;
  *
  * <p>
  * Chunk references passed into this class are never retained — only the
- * {@link ChunkDelta} extracted from the duck interface and the {@code long}
- * chunk key
- * are stored.
+ * {@link ChunkDelta} extracted from the duck interface and a dimension-aware
+ * chunk key are stored.
  *
  * @author Liparakis
  * @version 1.1
@@ -59,7 +61,7 @@ public final class GlobalChunkTracker {
      * Active dirty deltas awaiting persistence. Uses {@link ConcurrentHashMap}
      * for lock-free concurrent reads and writes without external synchronization.
      */
-    private static final Map<Long, ChunkDelta<?, ?>> dirtyDeltas = new ConcurrentHashMap<>();
+    private static final Map<DimensionChunkKey, ChunkDelta<?, ?>> dirtyDeltas = new ConcurrentHashMap<>();
 
     /**
      * LRU cache of recently unloaded deltas. Retained as a safety net so that
@@ -69,10 +71,10 @@ public final class GlobalChunkTracker {
      * Must be accessed under {@code synchronized (unloadCache)} because
      * {@link LinkedHashMap} access-order tracking is not thread-safe.
      */
-    private static final Map<Long, ChunkDelta<?, ?>> unloadCache = new LinkedHashMap<>(
+    private static final Map<DimensionChunkKey, ChunkDelta<?, ?>> unloadCache = new LinkedHashMap<>(
             MAX_CACHE_SIZE, 0.75f, /* accessOrder= */ true) {
         @Override
-        protected boolean removeEldestEntry(final Map.Entry<Long, ChunkDelta<?, ?>> eldest) {
+        protected boolean removeEldestEntry(final Map.Entry<DimensionChunkKey, ChunkDelta<?, ?>> eldest) {
             return size() > MAX_CACHE_SIZE;
         }
     };
@@ -103,7 +105,7 @@ public final class GlobalChunkTracker {
         if (isDeltaAbsent(delta))
             return;
 
-        putDelta(chunk.getPos().toLong(), delta);
+        putDelta(keyOf(chunk.getWorld().getRegistryKey(), chunk.getPos()), delta);
     }
 
     /**
@@ -113,12 +115,13 @@ public final class GlobalChunkTracker {
      * Intended for cases where the chunk is not directly available (e.g., during
      * server-side delta construction from storage).
      *
+     * @param world the world owning the chunk position
      * @param pos   the chunk position
      * @param delta the delta to register
      */
-    public static void addDelta(final ChunkPos pos, final ChunkDelta<?, ?> delta) {
+    public static void addDelta(final World world, final ChunkPos pos, final ChunkDelta<?, ?> delta) {
         delta.markDirty();
-        putDelta(pos.toLong(), delta);
+        putDelta(keyOf(world.getRegistryKey(), pos), delta);
     }
 
     /**
@@ -129,10 +132,11 @@ public final class GlobalChunkTracker {
      * for shutdown re-saves. LRU eviction ({@value #MAX_CACHE_SIZE}) prevents
      * unbounded memory growth.
      *
+     * @param world    the world owning the chunk position
      * @param position the chunk position that was successfully saved
      */
-    public static void markSaved(final ChunkPos position) {
-        dirtyDeltas.remove(position.toLong());
+    public static void markSaved(final World world, final ChunkPos position) {
+        dirtyDeltas.remove(keyOf(world.getRegistryKey(), position));
         // Intentionally NOT removed from unloadCache — safety net for shutdown
         // re-saves.
     }
@@ -165,11 +169,12 @@ public final class GlobalChunkTracker {
      * Checks the dirty delta map first (fast, lock-free). Falls back to the
      * unload cache if not found there.
      *
+     * @param world    the world owning the chunk position
      * @param position the chunk position to look up
      * @return the tracked delta, or null if not found in either store
      */
-    public static ChunkDelta<?, ?> getDelta(final ChunkPos position) {
-        final long chunkKey = position.toLong();
+    public static ChunkDelta<?, ?> getDelta(final World world, final ChunkPos position) {
+        final DimensionChunkKey chunkKey = keyOf(world.getRegistryKey(), position);
 
         final ChunkDelta<?, ?> active = dirtyDeltas.get(chunkKey);
         if (active != null)
@@ -182,11 +187,14 @@ public final class GlobalChunkTracker {
      * Returns an unmodifiable snapshot of all chunk positions with pending dirty
      * deltas.
      *
-     * @return set of chunk positions awaiting persistence
+     * @param world the world whose pending positions should be returned
+     * @return set of chunk positions awaiting persistence for the given world
      */
-    public static Set<ChunkPos> getPendingPositions() {
+    public static Set<ChunkPos> getPendingPositions(final World world) {
+        final RegistryKey<World> dimension = world.getRegistryKey();
         return dirtyDeltas.keySet().stream()
-                .map(ChunkPos::new)
+                .filter(key -> key.dimension().equals(dimension))
+                .map(key -> new ChunkPos(key.chunkKey()))
                 .collect(Collectors.toUnmodifiableSet());
     }
 
@@ -198,10 +206,10 @@ public final class GlobalChunkTracker {
      * Puts the given delta into both the dirty map and the unload cache.
      * Centralizes the dual-write so neither store is accidentally omitted.
      *
-     * @param chunkKey the packed chunk position key
+     * @param chunkKey the dimension-aware chunk key
      * @param delta    the delta to store
      */
-    private static void putDelta(final long chunkKey, final ChunkDelta<?, ?> delta) {
+    private static void putDelta(final DimensionChunkKey chunkKey, final ChunkDelta<?, ?> delta) {
         dirtyDeltas.put(chunkKey, delta);
         putInUnloadCache(chunkKey, delta);
     }
@@ -209,10 +217,10 @@ public final class GlobalChunkTracker {
     /**
      * Inserts the given entry into the unload cache under the cache's own lock.
      *
-     * @param chunkKey the packed chunk position key
+     * @param chunkKey the dimension-aware chunk key
      * @param delta    the delta to cache
      */
-    private static void putInUnloadCache(final long chunkKey, final ChunkDelta<?, ?> delta) {
+    private static void putInUnloadCache(final DimensionChunkKey chunkKey, final ChunkDelta<?, ?> delta) {
         synchronized (unloadCache) {
             unloadCache.put(chunkKey, delta);
         }
@@ -221,10 +229,10 @@ public final class GlobalChunkTracker {
     /**
      * Retrieves an entry from the unload cache under the cache's own lock.
      *
-     * @param chunkKey the packed chunk position key
+     * @param chunkKey the dimension-aware chunk key
      * @return the cached delta, or null if not present
      */
-    private static ChunkDelta<?, ?> getFromUnloadCache(final long chunkKey) {
+    private static ChunkDelta<?, ?> getFromUnloadCache(final DimensionChunkKey chunkKey) {
         synchronized (unloadCache) {
             return unloadCache.get(chunkKey);
         }
@@ -263,5 +271,14 @@ public final class GlobalChunkTracker {
      */
     private static boolean isDeltaAbsent(final ChunkDelta<?, ?> delta) {
         return delta == null || delta.isEmpty();
+    }
+
+    private static DimensionChunkKey keyOf(final RegistryKey<World> dimension, final ChunkPos pos) {
+        return new DimensionChunkKey(
+                Objects.requireNonNull(dimension, "dimension"),
+                Objects.requireNonNull(pos, "pos").toLong());
+    }
+
+    private record DimensionChunkKey(RegistryKey<World> dimension, long chunkKey) {
     }
 }
