@@ -177,21 +177,13 @@ public final class McaMigrator {
                         // is never mutated by two threads at once.
                         ProtoChunk proto;
                         synchronized (world.getPointOfInterestStorage()) {
-                            proto = Objects.requireNonNull(SerializedChunk.fromNbt(
-                                            world,
-                                            world.getRegistryManager(),
-                                            nbt)
-                                    )
-                                    .convert(
-                                            world,
-                                            world.getPointOfInterestStorage(),
-                                            storageKey,
-                                            globalPos
-                                    );
+                            proto = Objects.requireNonNull(
+                                    SerializedChunk.fromNbt(world, world.getRegistryManager(), nbt))
+                                    .convert(world, world.getPointOfInterestStorage(), storageKey, globalPos);
 
                         }
 
-                        ChunkDelta<BlockState, NbtCompound> delta = buildChunkDelta(proto, globalPos, mutablePos);
+                        ChunkDelta<BlockState, NbtCompound> delta = buildChunkDelta(proto, nbt, globalPos, mutablePos);
 
                         if (!delta.isEmpty()) {
                             storage.save(new CisChunkPos(globalPos.x, globalPos.z), delta);
@@ -224,10 +216,14 @@ public final class McaMigrator {
      */
     private static ChunkDelta<BlockState, NbtCompound> buildChunkDelta(
             ProtoChunk proto,
+            NbtCompound sourceNbt,
             ChunkPos globalPos,
             BlockPos.Mutable mutablePos) {
 
         ChunkDelta<BlockState, NbtCompound> delta = new ChunkDelta<>();
+        NbtCompound structureData = CisNbtUtil.extractStructureData(sourceNbt);
+        delta.setSuppressInitialRepopulation(true);
+        delta.setChunkMetadata(CisNbtUtil.createChunkMetadata(structureData, true), false);
 
         int startX = globalPos.getStartX();
         int startZ = globalPos.getStartZ();
