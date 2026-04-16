@@ -1,0 +1,69 @@
+plugins {
+    id("java-library")
+    id("maven-publish")
+    id("jacoco")
+}
+
+def modVersion = providers.gradleProperty("mod_version").get()
+def mavenGroup = providers.gradleProperty("maven_group").get()
+def archivesBaseName = providers.gradleProperty("archives_base_name").get()
+
+version = modVersion
+group = mavenGroup
+
+base {
+    archivesName = "${archivesBaseName}-core"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api 'it.unimi.dsi:fastutil:8.5.12'
+    api 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.mockito:mockito-core:5.7.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.7.0'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy(tasks.named("jacocoTestReport"))
+}
+
+tasks.named("jacocoTestReport") {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+jacoco {
+    toolVersion = "0.8.11"
+}
+
+publishing {
+    publications {
+        register("mavenJava", MavenPublication) {
+            from components.java
+        }
+    }
+}

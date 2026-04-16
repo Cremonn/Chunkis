@@ -152,24 +152,24 @@ public class WorldChunkMixin {
      * new changes.
      *
      * @param world        the server world
-     * @param proto        the ProtoChunk being promoted
+     * @param protoChunk        the ProtoChunk being promoted
      * @param entityLoader the entity loader for the chunk
      * @param ci           callback info
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
     private void chunkis$onConstructFromProto(
             final ServerWorld world,
-            final ProtoChunk proto,
+            final ProtoChunk protoChunk,
             final WorldChunk.EntityLoader entityLoader,
             final CallbackInfo ci) {
 
-        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(proto);
+        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(protoChunk);
 
-        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(proto);
+        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(protoChunk);
         if (protoDelta == null || protoDelta.isEmpty()) {
             return;
         }
-        restoreChunkFromDelta(world, getWorldChunk(), proto, protoDelta);
+        restoreChunkFromDelta(world, getWorldChunk(), protoChunk, protoDelta);
     }
 
     // -----------------------------------------------------------------------
@@ -354,6 +354,7 @@ public class WorldChunkMixin {
             final ChunkDelta<BlockState, NbtCompound> protoDelta) {
 
         final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+        selfDelta.setSuppressInitialRepopulation(protoDelta.shouldSuppressInitialRepopulation());
 
         try {
             chunkis$isRestoring = true;

@@ -17,6 +17,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.state.property.Property;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.SerializedChunk;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -64,9 +65,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
     @Final
     ServerWorld world;
 
-    /**
-     * Cached game data version — same for the lifetime of the server process.
-     */
+    /** Cached game data version — same for the lifetime of the server process. */
     @Unique
     private static final int GAME_DATA_VERSION = net.minecraft.SharedConstants.getGameVersion().getSaveVersion()
             .getId();
@@ -99,7 +98,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
     @SuppressWarnings("unchecked")
     @Unique
     private void forceSaveRemainingDeltas() {
-        final var pending = GlobalChunkTracker.getPendingPositions();
+        final var pending = GlobalChunkTracker.getPendingPositions(world);
         if (pending.isEmpty())
             return;
 
@@ -108,11 +107,11 @@ public abstract class ThreadedAnvilChunkStorageMixin {
 
         for (final ChunkPos pos : pending) {
             final ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker
-                    .getDelta(pos);
+                    .getDelta(world, pos);
 
             if (delta != null && delta.isDirty()) {
                 persistDelta(pos, delta);
-                GlobalChunkTracker.markSaved(pos);
+                GlobalChunkTracker.markSaved(world, pos);
             }
         }
     }
@@ -132,30 +131,30 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      * base NBT compound (via {@link CisNbtUtil}) and returned immediately —
      * cancelling the vanilla I/O path entirely.
      *
-     * @param pos the chunk position to load
+     * @param chunkPos the chunk position to load
      * @param cir callback whose return value is set to a completed future
      */
     @SuppressWarnings("unchecked")
     @Inject(method = "getUpdatedChunkNbt(Lnet/minecraft/util/math/ChunkPos;)Ljava/util/concurrent/CompletableFuture;", at = @At("HEAD"), cancellable = true)
     private void chunkis$onGetUpdatedChunkNbt(
-            final ChunkPos pos,
+            final ChunkPos chunkPos,
             final CallbackInfoReturnable<CompletableFuture<Optional<NbtCompound>>> cir) {
 
-        final CisChunkPos cisPos = toCisChunkPos(pos);
+        final CisChunkPos cisPos = toCisChunkPos(chunkPos);
 
         ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker
-                .getDelta(pos);
+                .getDelta(world, chunkPos);
 
         if (delta != null) {
             if (delta.isDirty()) {
                 getStorage().save(cisPos, delta);
-                GlobalChunkTracker.markSaved(pos);
+                GlobalChunkTracker.markSaved(world, chunkPos);
             }
         } else {
             delta = getStorage().load(cisPos);
         }
 
-        cir.setReturnValue(CompletableFuture.completedFuture(Optional.of(buildChunkNbt(pos, delta))));
+        cir.setReturnValue(CompletableFuture.completedFuture(Optional.of(buildChunkNbt(chunkPos, delta))));
     }
 
     // -------------------------------------------------------------------------
@@ -183,19 +182,20 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      */
     @Inject(method = "save(Lnet/minecraft/server/world/ChunkHolder;J)Z", at = @At("HEAD"), cancellable = true)
     private void chunkis$onSave(
-            ChunkHolder chunkHolder,
-            long currentTime,
-            CallbackInfoReturnable<Boolean> cir
-    ) {
+            final ChunkHolder chunkHolder,
+            final long currentTime,
+            final CallbackInfoReturnable<Boolean> cir) {
 
         final ChunkPos pos = chunkHolder.getPos();
         final Chunk chunk = selectChunkForSaving(chunkHolder);
 
-        ChunkDelta<BlockState, NbtCompound> delta = resolveTrackerDelta(pos);
+        ChunkDelta<BlockState, NbtCompound> delta = resolveTrackerDelta(pos, world);
 
         if (delta == null) {
             delta = resolveChunkDelta(chunk);
         }
+
+        delta = captureStructureMetadata(chunk, delta);
 
         if (delta == null) {
             // No modifications — cancel vanilla save (StoragePreventionMixin would
@@ -208,7 +208,7 @@ public abstract class ThreadedAnvilChunkStorageMixin {
 
         if (delta.isDirty()) {
             persistDelta(pos, delta);
-            GlobalChunkTracker.markSaved(pos);
+            GlobalChunkTracker.markSaved(world, pos);
         }
 
         if (chunk != null) {
@@ -230,8 +230,10 @@ public abstract class ThreadedAnvilChunkStorageMixin {
      */
     @Unique
     @SuppressWarnings("unchecked")
-    private static ChunkDelta<BlockState, NbtCompound> resolveTrackerDelta(final ChunkPos pos) {
-        return (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker.getDelta(pos);
+    private static ChunkDelta<BlockState, NbtCompound> resolveTrackerDelta(
+            final ChunkPos pos,
+            final ServerWorld world) {
+        return (ChunkDelta<BlockState, NbtCompound>) GlobalChunkTracker.getDelta(world, pos);
     }
 
     /**
@@ -319,8 +321,34 @@ public abstract class ThreadedAnvilChunkStorageMixin {
             final ChunkDelta<BlockState, NbtCompound> delta) {
 
         final NbtCompound nbt = CisNbtUtil.createBaseNbt(pos, GAME_DATA_VERSION);
+        CisNbtUtil.putChunkMetadata(nbt, delta);
         CisNbtUtil.putDelta(nbt, delta);
         return nbt;
+    }
+
+    /**
+     * Captures serialized structure metadata for the chunk so structure starts and
+     * references survive Chunkis' regenerate-on-load cycle.
+     */
+    @Unique
+    private ChunkDelta<BlockState, NbtCompound> captureStructureMetadata(
+            final Chunk chunk,
+            final ChunkDelta<BlockState, NbtCompound> existingDelta) {
+
+        if (chunk == null) {
+            return existingDelta;
+        }
+
+        final NbtCompound serializedChunk = SerializedChunk.fromChunk(world, chunk).serialize();
+        final NbtCompound structureData = CisNbtUtil.extractStructureData(serializedChunk);
+        if (existingDelta == null && structureData == null) {
+            return null;
+        }
+
+        final ChunkDelta<BlockState, NbtCompound> delta = existingDelta != null ? existingDelta : new ChunkDelta<>();
+        delta.setSuppressInitialRepopulation(true);
+        delta.setChunkMetadata(CisNbtUtil.createChunkMetadata(structureData, true));
+        return delta;
     }
 
     /**
