@@ -5,19 +5,23 @@ import io.liparakis.chunkis.core.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.Uuids;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
 
-import java.util.Optional;
+import java.util.*;
 
 /**
  * Utility for restoring chunks from Chunkis delta data.
@@ -86,6 +90,7 @@ public final class ChunkRestorer {
             final VanillaChunkSnapshot snapshot) {
 
         final RestorationVisitor visitor = new RestorationVisitor(world, chunk, runtimeDelta, snapshot);
+        visitor.cleanupReplayedEntities(protoDelta);
         protoDelta.accept(visitor);
         visitor.finishRestoration();
         return visitor.wasOptimized;
@@ -181,6 +186,45 @@ public final class ChunkRestorer {
             this.chunkPosition = chunk.getPos();
             this.runtimeDelta = runtimeDelta;
             this.snapshot = snapshot;
+        }
+
+        /**
+         * Removes replay-generated non-player entities from restored chunks before
+         * Chunkis reapplies the saved entity list.
+         *
+         * <p>This keeps terrain regeneration intact while preventing one-time
+         * structure or passive population side effects from stacking on top of the
+         * entities already persisted in the delta.</p>
+         *
+         * @param sourceDelta loaded persisted delta for the chunk
+         */
+        void cleanupReplayedEntities(final ChunkDelta<BlockState, NbtCompound> sourceDelta) {
+            if (sourceDelta == null || !sourceDelta.shouldSuppressInitialRepopulation()) {
+                return;
+            }
+
+            final Set<UUID> allowedUuids = collectPersistedEntityUuids(sourceDelta.getEntitiesList());
+            final List<Entity> liveEntities = world.getOtherEntities(
+                    null,
+                    new Box(
+                            chunkPosition.getStartX(),
+                            world.getBottomY(),
+                            chunkPosition.getStartZ(),
+                            chunkPosition.getEndX() + 1,
+                            world.getBottomY() + world.getHeight(),
+                            chunkPosition.getEndZ() + 1));
+
+            for (final Entity entity : liveEntities) {
+                if (entity instanceof PlayerEntity) {
+                    continue;
+                }
+
+                if (allowedUuids.contains(entity.getUuid())) {
+                    continue;
+                }
+
+                entity.discard();
+            }
         }
 
         // -------------------------------------------------------------------------
@@ -347,7 +391,8 @@ public final class ChunkRestorer {
                 return false;
             }
 
-            final Identifier id = Identifier.tryParse(idStr.orElse(null));
+            final String rawId = idStr.get();
+            final Identifier id = Identifier.tryParse(rawId);
             if (id == null) {
                 LOGGER.debug("Block entity NBT at {} has unparseable id '{}' — skipping", worldPos, idStr);
                 return false;
@@ -369,6 +414,7 @@ public final class ChunkRestorer {
             return true;
         }
 
+
         // -------------------------------------------------------------------------
         // Entity restoration
         // -------------------------------------------------------------------------
@@ -378,9 +424,8 @@ public final class ChunkRestorer {
          * to prevent duplicate spawning on re-load.
          *
          * <p>
-         * Checks for UUID conflicts before spawning to prevent duplicate entities.
-         * Uses Minecraft's built-in entity loading mechanism to handle all entity
-         * types, including those with passengers.
+         * Uses Minecraft's built-in {@link EntityType#loadEntityWithPassengers}
+         * to handle all entity types, including vehicles with passengers.
          *
          * <p>
          * <b>Thread safety:</b> Must be called on the server thread.
@@ -388,52 +433,54 @@ public final class ChunkRestorer {
          * @param nbt the serialized entity data
          */
         private void restoreEntity(final NbtCompound nbt) {
-            try {
-                EntityType.loadEntityWithPassengers(nbt, world, SpawnReason.LOAD, entity ->
-                {
-                    if (isEntityAlreadySpawned(entity.getUuid()))
-                        return entity;
-
-                    world.spawnEntity(entity);
+            EntityType.loadEntityWithPassengers(nbt, world, SpawnReason.LOAD, entity -> {
+                if (isEntityAlreadySpawned(entity.getUuid()))
                     return entity;
-                });
+                world.spawnEntity(entity);
+                return entity;
+            });
 
-                if (runtimeDelta != null)
-                    runtimeDelta.addPendingEntity(nbt);
+            if (runtimeDelta != null) {
+                runtimeDelta.addPendingEntity(nbt);
+            }
+        }
 
-            } catch (Exception e) {
-                LOGGER.error("Failed to restore entity in chunk {}", chunkPosition, e);
+        public void finishRestoration() {
+            if (runtimeDelta != null) {
+                runtimeDelta.clearPendingEntities();
             }
         }
 
         /**
-         * Returns {@code true} if an entity with the given UUID is already present
-         * in the world.
-         *
-         * <p>
-         * Used to prevent duplicate spawning when a delta is applied more than
-         * once (e.g. after a server restart while the chunk is still loaded).
+         * Returns true if an entity with the given UUID is already present in the
+         * world.
+         * Used to prevent duplicate spawning when a delta is applied more than once.
          *
          * @param uuid the UUID to check
-         * @return {@code true} if the entity already exists in the world
+         * @return true if the entity already exists
          */
         private boolean isEntityAlreadySpawned(final java.util.UUID uuid) {
             return world.getEntity(uuid) != null;
         }
 
         /**
-         * Finalizes restoration by clearing the runtime delta's pending entity
-         * list.
+         * Extracts all valid entity UUIDs from the persisted entity payload list.
          *
-         * <p>
-         * Called after all delta entries have been visited to ensure the
-         * pending entity queue does not accumulate stale entries across
-         * successive restorations of the same chunk.
+         * @param entities persisted entity NBT payloads
+         * @return UUID allowlist for entities that should remain after cleanup
          */
-        public void finishRestoration() {
-            if (runtimeDelta != null) {
-                runtimeDelta.clearPendingEntities();
+        private Set<UUID> collectPersistedEntityUuids(final List<NbtCompound> entities) {
+            final Set<UUID> uuids = new HashSet<>();
+
+            for (final NbtCompound nbt : entities) {
+                if (nbt != null) {
+                    nbt.getIntArray("UUID")
+                            .map(Uuids::toUuid)
+                            .ifPresent(uuids::add);
+                }
             }
+
+            return uuids;
         }
     }
 }

@@ -29,6 +29,7 @@ public class ServerWorldMixin {
             return;
 
         ServerWorld world = (ServerWorld) (Object) this;
+        assert world.getServer() != null;
         if (world.getServer().getThread() != Thread.currentThread())
             return;
 
