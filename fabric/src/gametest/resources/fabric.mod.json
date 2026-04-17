@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "chunkis-gametest",
+  "version": "1.0.0",
+  "name": "Chunkis Game Tests",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-gametest": [
+      "io.liparakis.chunkis.gametest.CisFixtureMigrationGameTest"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.17.3",
+    "minecraft": "~1.21",
+    "java": ">=21",
+    "fabric-api": "*",
+    "chunkis": "*"
+  }
+}

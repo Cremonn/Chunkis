@@ -12,7 +12,9 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.WorldSavePath;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
-import net.minecraft.world.chunk.*;
+import net.minecraft.world.chunk.PalettesFactory;
+import net.minecraft.world.chunk.ProtoChunk;
+import net.minecraft.world.chunk.SerializedChunk;
 import net.minecraft.world.storage.RegionFile;
 import net.minecraft.world.storage.StorageKey;
 import org.slf4j.Logger;
@@ -121,10 +123,16 @@ public final class McaMigrator {
      * {@code ROOT}; we only need to append {@code region/}.
      */
     private static Path resolveMcaRegionDir(ServerWorld world) {
+        // WorldSavePath.ROOT is the save root (e.g. "world/").
+        // Dimension-specific data lives under "dimensions/<namespace>/<path>/" for
+        // non-overworld dimensions; the server handles this via getSavePath on the
+        // level storage, but the simplest portable approach is to reconstruct it
+        // the same way Minecraft does internally.
         Path root = world.getServer().getSavePath(WorldSavePath.ROOT);
         String namespace = world.getRegistryKey().getValue().getNamespace();
         String dimPath = world.getRegistryKey().getValue().getPath();
 
+        // "minecraft:overworld" maps to the root region folder directly.
         boolean isOverworld = "minecraft".equals(namespace) && "overworld".equals(dimPath);
         Path base = isOverworld
                 ? root
@@ -147,10 +155,11 @@ public final class McaMigrator {
         try (RegionFile regionFile = new RegionFile(
                 storageKey, mcaPath, mcaPath.getParent(), true)) {
 
-
+            // Single mutable BlockPos reused across every block in every chunk
+            // to avoid allocating up to 16*16*384 = ~98 000 short-lived objects
+            // per region file.
             BlockPos.Mutable mutablePos = new BlockPos.Mutable();
             PalettesFactory palettesFactory = PalettesFactory.fromRegistryManager(world.getRegistryManager());
-            // ---------------------------------------------------------------
 
             for (int x = 0; x < REGION_SIZE; x++) {
                 for (int z = 0; z < REGION_SIZE; z++) {
@@ -183,7 +192,7 @@ public final class McaMigrator {
                                     );
                         }
 
-                        ChunkDelta<BlockState, NbtCompound> delta = buildChunkDelta(proto, globalPos, mutablePos);
+                        ChunkDelta<BlockState, NbtCompound> delta = buildChunkDelta(proto, nbt, globalPos, mutablePos);
 
                         if (!delta.isEmpty()) {
                             storage.save(new CisChunkPos(globalPos.x, globalPos.z), delta);
@@ -211,14 +220,19 @@ public final class McaMigrator {
      *
      * <p>
      * Extracted so the hot path (block iteration) is clearly isolated and
-     * the mutable {@link BlockPos} lifetime is obvious.
+     * the
+     * mutable {@link BlockPos} lifetime is obvious.
      */
     private static ChunkDelta<BlockState, NbtCompound> buildChunkDelta(
             ProtoChunk proto,
+            NbtCompound sourceNbt,
             ChunkPos globalPos,
             BlockPos.Mutable mutablePos) {
 
         ChunkDelta<BlockState, NbtCompound> delta = new ChunkDelta<>();
+        NbtCompound structureData = CisNbtUtil.extractStructureData(sourceNbt);
+        delta.setSuppressInitialRepopulation(true);
+        delta.setChunkMetadata(CisNbtUtil.createChunkMetadata(structureData, true), false);
 
         int startX = globalPos.getStartX();
         int startZ = globalPos.getStartZ();
@@ -229,6 +243,7 @@ public final class McaMigrator {
         // Reuse mutablePos to avoid allocating ~98 000 BlockPos objects per chunk
         // column.
         for (int by = bottomY; by < topY; by++) {
+            //
             for (int bx = 0; bx < 16; bx++) {
                 for (int bz = 0; bz < 16; bz++) {
                     mutablePos.set(startX + bx, by, startZ + bz);
