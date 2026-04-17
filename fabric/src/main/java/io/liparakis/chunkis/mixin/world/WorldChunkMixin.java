@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.storage.CisConstants;
 import io.liparakis.chunkis.util.ChunkRestorer;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
@@ -65,18 +65,19 @@ public class WorldChunkMixin {
      * to the delta.
      * <p>
      * <b>Performance Note:</b> This is on the hot path (called for every block
-     * change).
-     * Early exits minimize overhead for filtered cases.
+     * change). Early exits minimize overhead for filtered cases.
      *
      * @param pos   the block position being modified
      * @param state the new block state
-     * @param flags any existing flags
+     * @param flags block update flags passed through the chunk write path
      * @param cir   callback containing the previous block state
      */
-
     @Inject(method = "setBlockState", at = @At("HEAD"))
     private void chunkis$onSetBlockState(
-            BlockPos pos, BlockState state, int flags, CallbackInfoReturnable<BlockState> cir) {
+            final BlockPos pos,
+            final BlockState state,
+            final int flags,
+            final CallbackInfoReturnable<BlockState> cir) {
 
         if (!shouldTrackBlockChange(getWorldChunk(), state)) {
             return;
@@ -151,24 +152,24 @@ public class WorldChunkMixin {
      * new changes.
      *
      * @param world        the server world
-     * @param proto        the ProtoChunk being promoted
+     * @param protoChunk        the ProtoChunk being promoted
      * @param entityLoader the entity loader for the chunk
      * @param ci           callback info
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
     private void chunkis$onConstructFromProto(
             final ServerWorld world,
-            final ProtoChunk proto,
+            final ProtoChunk protoChunk,
             final WorldChunk.EntityLoader entityLoader,
             final CallbackInfo ci) {
 
-        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(proto);
+        chunkis$vanillaSnapshot = new VanillaChunkSnapshot(protoChunk);
 
-        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(proto);
+        final ChunkDelta<BlockState, NbtCompound> protoDelta = resolveProtoDelta(protoChunk);
         if (protoDelta == null || protoDelta.isEmpty()) {
             return;
         }
-        restoreChunkFromDelta(world, getWorldChunk(), proto, protoDelta);
+        restoreChunkFromDelta(world, getWorldChunk(), protoChunk, protoDelta);
     }
 
     // -----------------------------------------------------------------------
@@ -274,7 +275,7 @@ public class WorldChunkMixin {
      * @param state the new block state
      */
     @Unique
-    @SuppressWarnings({"unchecked", "rawtypes"}) // Raw ChunkDelta: getDelta() returns wildcard;
+    @SuppressWarnings({ "unchecked", "rawtypes" }) // Raw ChunkDelta: getDelta() returns wildcard;
     // addBlockChange/removeBlockChange are type-erased
     private void updateDeltaForBlockChange(final BlockPos pos, final BlockState state) {
         final int localX = pos.getX() & CisConstants.COORD_MASK;
@@ -354,6 +355,7 @@ public class WorldChunkMixin {
             final ChunkDelta<BlockState, NbtCompound> protoDelta) {
 
         final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+        selfDelta.setSuppressInitialRepopulation(protoDelta.shouldSuppressInitialRepopulation());
 
         try {
             chunkis$isRestoring = true;

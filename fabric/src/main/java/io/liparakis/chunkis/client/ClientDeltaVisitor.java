@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.client;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.block.BlockState;
@@ -13,8 +13,7 @@ import net.minecraft.nbt.NbtCompound;
 import net.minecraft.util.math.BlockPos;
 
 /**
- * Reusable visitor that applies a decoded {@link ChunkDelta} to the client
- * world.
+ * Reusable visitor that applies a decoded {@link ChunkDelta} to the client world.
  *
  * <p>
  * An instance is created once per thread via {@link ThreadLocal} in
@@ -28,8 +27,7 @@ import net.minecraft.util.math.BlockPos;
  *
  * <p>
  * No chunk or world references are retained beyond the scope of the
- * {@link #reset} call that provided them and the
- * {@link ChunkDelta.DeltaVisitor}
+ * {@link #reset} call that provided them and the {@link ChunkDelta.DeltaVisitor}
  * methods that consume them.
  *
  * @author Liparakis
@@ -49,15 +47,13 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
     private ClientWorld world;
 
     /**
-     * World X of local coordinate origin (0,y,0). Pre-calculated as
-     * {@code chunkX << 4}.
+     * World X of local coordinate origin (0,y,0). Pre-calculated as {@code chunkX << 4}.
      * Cached to avoid repeated bit-shift in the block visit hot path.
      */
     private int baseX;
 
     /**
-     * World Z of local coordinate origin (0,y,0). Pre-calculated as
-     * {@code chunkZ << 4}.
+     * World Z of local coordinate origin (0,y,0). Pre-calculated as {@code chunkZ << 4}.
      * Cached to avoid repeated bit-shift in the block visit hot path.
      */
     private int baseZ;
@@ -128,12 +124,10 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
         clientDelta.addBlockEntityData(x, y, z, nbt, false);
 
         final BlockPos pos = new BlockPos(baseX + x, y, baseZ + z);
-        if (!canHaveBlockEntity(pos))
-            return;
+        if (!canHaveBlockEntity(pos)) return;
 
         final BlockEntity be = deserializeBlockEntity(pos, nbt);
-        if (be == null)
-            return;
+        if (be == null) return;
 
         replaceBlockEntity(pos, be);
     }
@@ -164,8 +158,7 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
     // -------------------------------------------------------------------------
 
     /**
-     * Returns true if the block at the given position currently supports a block
-     * entity.
+     * Returns true if the block at the given position currently supports a block entity.
      *
      * @param pos the world position to check
      * @return true if the block state at pos has a block entity
@@ -210,10 +203,10 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
     // -------------------------------------------------------------------------
 
     /**
-     * Returns true if no entity with the given integer ID is currently tracked
-     * by the client world. Used to prevent adding duplicate entities on re-send.
+     * Returns true if no entity with the given ID is currently tracked by the world.
+     * Used to prevent adding duplicate entities on re-send.
      *
-     * @param entityId the network entity ID to check
+     * @param entityId the entity ID to check
      * @return true if the entity is not yet present in the world
      */
     private boolean isEntityUntracked(final int entityId) {

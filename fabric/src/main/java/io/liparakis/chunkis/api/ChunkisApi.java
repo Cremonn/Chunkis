@@ -1,7 +1,7 @@
 package io.liparakis.chunkis.api;
 
-import io.liparakis.chunkis.model.ChunkDelta;
-import io.liparakis.chunkis.storage.RegionChunkStorage;
+import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.storage.CisStorage;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
@@ -14,7 +14,7 @@ import java.util.Optional;
 /**
  * Public API for interacting with the Chunkis mod storage system.
  * <p>
- * This interface provides methods to access the underlying {@link RegionChunkStorage}
+ * This interface provides methods to access the underlying {@link CisStorage}
  * for a world, as well as helper methods for working with Chunkis-managed
  * chunks.
  * </p>
@@ -40,7 +40,7 @@ public interface ChunkisApi {
      * @param world the world to get storage for
      * @return the storage manager
      */
-    RegionChunkStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(ServerWorld world);
+    CisStorage<Block, BlockState, Property<?>, NbtCompound> getStorage(ServerWorld world);
 
     /**
      * Gets the chunk delta data associated with the given chunk, if it exists.

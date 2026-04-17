@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.util.ChunkBlockEntityCapture;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.block.BlockState;

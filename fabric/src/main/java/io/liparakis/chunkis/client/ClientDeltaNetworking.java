@@ -2,9 +2,9 @@ package io.liparakis.chunkis.client;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.codec.stream.CisNetworkDecoder;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
+import io.liparakis.chunkis.storage.codec.CisNetworkDecoder;
 import io.liparakis.chunkis.util.FabricNetworkCodecFactory;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -107,7 +107,9 @@ public final class ClientDeltaNetworking {
         }
 
         final var client = context.client();
-        client.execute(() -> processChunkDelta(payload, client.world));
+        if (client != null) {
+            client.execute(() -> processChunkDelta(payload, client.world));
+        }
     }
 
     // -------------------------------------------------------------------------

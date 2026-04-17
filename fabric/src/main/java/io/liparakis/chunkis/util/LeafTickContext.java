@@ -52,7 +52,7 @@ import org.slf4j.LoggerFactory;
  * {@link AutoCloseable} pattern and warns on negative depth (mismatched enter/exit).
  *
  * @author Liparakis
- * @version 1.2
+ * @version 1.1
  * @see ThreadLocal
  */
 public final class LeafTickContext {
@@ -96,8 +96,7 @@ public final class LeafTickContext {
     public static ContextHandle enter() {
         final ContextHolder holder = CONTEXT.get();
         holder.depth++;
-        if (DEBUG_MODE) LOGGER.debug("Entered leaf tick context (depth: {}, thread: {})",
-                holder.depth, Thread.currentThread().getName());
+        logDebug("Entered leaf tick context (depth: {}, thread: {})", holder.depth);
         return new ContextHandle(holder);
     }
 
@@ -129,8 +128,24 @@ public final class LeafTickContext {
     public static void set(final boolean isActive) {
         final ContextHolder holder = CONTEXT.get();
         holder.depth = isActive ? 1 : 0;
-        if (DEBUG_MODE) LOGGER.debug("Set leaf tick context to {} (thread: {})",
-                isActive, Thread.currentThread().getName());
+        logDebug("Set leaf tick context to {} (thread: {})", isActive);
+    }
+
+    // -------------------------------------------------------------------------
+    // Debug logging
+    // -------------------------------------------------------------------------
+
+    /**
+     * Emits a debug log message with the current thread name appended as the
+     * last argument. No-ops when {@link #DEBUG_MODE} is false.
+     *
+     * @param pattern SLF4J message pattern (must have exactly two {@code {}} placeholders)
+     * @param first   the first argument to interpolate
+     */
+    private static void logDebug(final String pattern, final Object first) {
+        if (DEBUG_MODE) {
+            LOGGER.debug(pattern, first, Thread.currentThread().getName());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -188,7 +203,7 @@ public final class LeafTickContext {
          * subsequent calls after the first are ignored.
          *
          * <p>
-         * If depth becomes negative (mismatched enter/exit), an error is logged
+         * If depth becomes negative (mismatched enter/exit), a warning is logged
          * and depth is reset to zero to prevent cascading incorrect state.
          */
         @Override
@@ -197,16 +212,33 @@ public final class LeafTickContext {
             closed = true;
 
             holder.depth--;
-            if (DEBUG_MODE) LOGGER.debug("Exited leaf tick context (depth: {}, thread: {})",
-                    holder.depth, Thread.currentThread().getName());
+            logDebug("Exited leaf tick context (depth: {}, thread: {})", holder.depth);
 
-            if (holder.depth < 0) {
-                LOGGER.error(
-                        "Leaf tick context depth became negative — mismatched enter/exit calls detected. " +
-                                "Resetting to 0. (thread: {})",
-                        Thread.currentThread().getName());
+            if (isDepthNegative()) {
+                logNegativeDepthError();
                 holder.depth = 0;
             }
+        }
+
+        /**
+         * Returns true if the depth counter has gone below zero, indicating a
+         * mismatched enter/exit call somewhere in the call stack.
+         *
+         * @return true if depth is negative
+         */
+        private boolean isDepthNegative() {
+            return holder.depth < 0;
+        }
+
+        /**
+         * Emits an error log for a negative depth condition, including the thread name
+         * to help identify which thread has the mismatched enter/exit.
+         */
+        private static void logNegativeDepthError() {
+            LOGGER.error(
+                    "Leaf tick context depth became negative — mismatched enter/exit calls detected. " +
+                            "Resetting to 0. (thread: {})",
+                    Thread.currentThread().getName());
         }
     }
 }

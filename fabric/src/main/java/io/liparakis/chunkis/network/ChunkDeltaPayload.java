@@ -33,8 +33,8 @@ import java.util.zip.Inflater;
  * <p>
  * Compression is attempted only when the raw payload is at least
  * {@value #COMPRESSION_THRESHOLD} bytes. The compressed form is used only when
- * it is at least 10% smaller than the original — below that, the decompression
- * overhead on the receiving end is not worthwhile.
+ * it is at least 10% smaller than the
+ * original — below that, the decompression overhead is not worthwhile.
  *
  * <h2>Thread safety</h2>
  * <p>
@@ -42,7 +42,7 @@ import java.util.zip.Inflater;
  * construction cost and synchronization overhead on the Netty I/O threads.
  *
  * @author Liparakis
- * @version 1.3
+ * @version 1.2
  */
 public record ChunkDeltaPayload(
         byte[] data,
@@ -121,7 +121,7 @@ public record ChunkDeltaPayload(
      * Compression is applied when both:
      * <ul>
      * <li>the raw size is at least {@value #COMPRESSION_THRESHOLD} bytes, and</li>
-     * <li>the compressed size is less than {@value #COMPRESSION_RATIO_THRESHOLD}
+     * <li>the compressed size is less than 10%
      *     of the raw size.</li>
      * </ul>
      * Otherwise a defensive copy of the raw bytes is stored uncompressed.
@@ -134,9 +134,9 @@ public record ChunkDeltaPayload(
     public static ChunkDeltaPayload create(final byte[] rawData, final int chunkX, final int chunkZ) {
         Objects.requireNonNull(rawData, "rawData must not be null");
 
-        if (rawData.length >= COMPRESSION_THRESHOLD) {
+        if (shouldAttemptCompression(rawData)) {
             final byte[] compressed = compress(rawData);
-            if (compressed.length < rawData.length * COMPRESSION_RATIO_THRESHOLD) {
+            if (isCompressionBeneficial(compressed, rawData)) {
                 return new ChunkDeltaPayload(compressed, chunkX, chunkZ, true, rawData.length);
             }
         }
@@ -161,24 +161,22 @@ public record ChunkDeltaPayload(
      */
     private static ChunkDeltaPayload read(final RegistryByteBuf buf) {
         try {
-            final int chunkX          = buf.readInt();
-            final int chunkZ          = buf.readInt();
-            final boolean isCompressed = (buf.readByte() & FLAG_COMPRESSED) != 0;
+            final int chunkX       = buf.readInt();
+            final int chunkZ       = buf.readInt();
+            final byte flags       = buf.readByte();
+            final boolean isCompressed = isCompressedFlag(flags);
 
             final int dataLength = buf.readInt();
-            if (dataLength < 0 || dataLength > MAX_PAYLOAD_SIZE) {
-                throw new IllegalArgumentException("Payload data length out of range: " + dataLength);
-            }
+            validatePayloadLength(dataLength, "data length");
 
             final byte[] data = new byte[dataLength];
             buf.readBytes(data);
 
             if (isCompressed) {
                 final int originalSize = buf.readInt();
-                if (originalSize < 0 || originalSize > MAX_PAYLOAD_SIZE) {
-                    throw new IllegalArgumentException("Payload decompressed size out of range: " + originalSize);
-                }
-                return new ChunkDeltaPayload(decompress(data, originalSize), chunkX, chunkZ, true, originalSize);
+                validatePayloadLength(originalSize, "decompressed size");
+                final byte[] decompressed = decompress(data, originalSize);
+                return new ChunkDeltaPayload(decompressed, chunkX, chunkZ, true, originalSize);
             }
 
             return new ChunkDeltaPayload(data, chunkX, chunkZ, false, 0);
@@ -266,12 +264,77 @@ public record ChunkDeltaPayload(
         }
 
         final byte[] result = baos.toByteArray();
-        if (result.length != originalSize) {
-            throw new IOException(String.format(
-                    "Decompression size mismatch: expected %d bytes, got %d bytes",
-                    originalSize, result.length));
-        }
+        validateDecompressedSize(result.length, originalSize);
         return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Validation helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Throws {@link IllegalArgumentException} if the given length is negative or
+     * exceeds {@link #MAX_PAYLOAD_SIZE}.
+     *
+     * @param length    the length to validate
+     * @param fieldName a human-readable field name used in the error message
+     */
+    private static void validatePayloadLength(final int length, final String fieldName) {
+        if (length < 0 || length > MAX_PAYLOAD_SIZE) {
+            throw new IllegalArgumentException(
+                    "Payload " + fieldName + " out of range: " + length);
+        }
+    }
+
+    /**
+     * Throws {@link IOException} if the actual decompressed size does not match
+     * the expected size declared in the wire format.
+     *
+     * @param actual   the actual number of bytes produced by inflation
+     * @param expected the expected number declared in the packet
+     * @throws IOException if the sizes differ
+     */
+    private static void validateDecompressedSize(final int actual, final int expected) throws IOException {
+        if (actual != expected) {
+            throw new IOException(String.format(
+                    "Decompression size mismatch: expected %d bytes, got %d bytes", expected, actual));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Guard predicates
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the raw data is large enough to make compression worthwhile.
+     *
+     * @param rawData the uncompressed payload bytes
+     * @return true if compression should be attempted
+     */
+    private static boolean shouldAttemptCompression(final byte[] rawData) {
+        return rawData.length >= COMPRESSION_THRESHOLD;
+    }
+
+    /**
+     * Returns true if the compressed form is small enough relative to the original
+     * to justify the decompression overhead on the receiving end.
+     *
+     * @param compressed the compressed bytes
+     * @param raw        the original uncompressed bytes
+     * @return true if the compressed form should be used
+     */
+    private static boolean isCompressionBeneficial(final byte[] compressed, final byte[] raw) {
+        return compressed.length < raw.length * COMPRESSION_RATIO_THRESHOLD;
+    }
+
+    /**
+     * Returns true if the compressed flag bit is set in the given flags byte.
+     *
+     * @param flags the flags byte read from the wire
+     * @return true if the payload is compressed
+     */
+    private static boolean isCompressedFlag(final byte flags) {
+        return (flags & FLAG_COMPRESSED) != 0;
     }
 
     // -------------------------------------------------------------------------

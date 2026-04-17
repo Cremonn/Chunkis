@@ -1,23 +1,27 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.Chunkis;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BlockEntityType;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.Uuids;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
 
-import java.util.UUID;
+import java.util.*;
 
 /**
  * Utility for restoring chunks from Chunkis delta data.
@@ -43,7 +47,7 @@ import java.util.UUID;
  * Entity spawning and chunk modification are not thread-safe.
  *
  * @author Liparakis
- * @version 2.2
+ * @version 2.1
  */
 public final class ChunkRestorer {
 
@@ -54,14 +58,13 @@ public final class ChunkRestorer {
      */
     private static final int SECTION_Y_MASK = 15;
 
-    /**
-     * NBT key holding the block entity type identifier.
-     */
-    private static final String BLOCK_ENTITY_ID_KEY = "id";
-
     private ChunkRestorer() {
         throw new AssertionError("Utility class");
     }
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
 
     /**
      * Restores a chunk from delta data, validating against the vanilla snapshot.
@@ -75,7 +78,8 @@ public final class ChunkRestorer {
      * @param chunk        the chunk to restore modifications into
      * @param protoDelta   the source delta containing saved modifications
      * @param runtimeDelta the runtime delta to populate with validated changes
-     * @param snapshot     the vanilla worldgen snapshot for redundancy checks; may be null
+     * @param snapshot     the vanilla worldgen snapshot for redundancy checks; may
+     *                     be null
      * @return true if at least one redundant entry was detected and discarded
      */
     public static boolean restore(
@@ -86,10 +90,15 @@ public final class ChunkRestorer {
             final VanillaChunkSnapshot snapshot) {
 
         final RestorationVisitor visitor = new RestorationVisitor(world, chunk, runtimeDelta, snapshot);
+        visitor.cleanupReplayedEntities(protoDelta);
         protoDelta.accept(visitor);
         visitor.finishRestoration();
         return visitor.wasOptimized;
     }
+
+    // -------------------------------------------------------------------------
+    // Block application (static, no world retention)
+    // -------------------------------------------------------------------------
 
     /**
      * Applies a single block state change directly to a chunk section's palette
@@ -137,6 +146,10 @@ public final class ChunkRestorer {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // RestorationVisitor
+    // -------------------------------------------------------------------------
+
     /**
      * Visitor that processes each delta entry during restoration.
      *
@@ -158,7 +171,8 @@ public final class ChunkRestorer {
         private final VanillaChunkSnapshot snapshot;
 
         /**
-         * Set to true if at least one block entry was skipped as redundant with vanilla.
+         * Set to true if at least one block entry was skipped as redundant with
+         * vanilla.
          */
         boolean wasOptimized = false;
 
@@ -174,6 +188,49 @@ public final class ChunkRestorer {
             this.snapshot = snapshot;
         }
 
+        /**
+         * Removes replay-generated non-player entities from restored chunks before
+         * Chunkis reapplies the saved entity list.
+         *
+         * <p>This keeps terrain regeneration intact while preventing one-time
+         * structure or passive population side effects from stacking on top of the
+         * entities already persisted in the delta.</p>
+         *
+         * @param sourceDelta loaded persisted delta for the chunk
+         */
+        void cleanupReplayedEntities(final ChunkDelta<BlockState, NbtCompound> sourceDelta) {
+            if (sourceDelta == null || !sourceDelta.shouldSuppressInitialRepopulation()) {
+                return;
+            }
+
+            final Set<UUID> allowedUuids = collectPersistedEntityUuids(sourceDelta.getEntitiesList());
+            final List<Entity> liveEntities = world.getOtherEntities(
+                    null,
+                    new Box(
+                            chunkPosition.getStartX(),
+                            world.getBottomY(),
+                            chunkPosition.getStartZ(),
+                            chunkPosition.getEndX() + 1,
+                            world.getBottomY() + world.getHeight(),
+                            chunkPosition.getEndZ() + 1));
+
+            for (final Entity entity : liveEntities) {
+                if (entity instanceof PlayerEntity) {
+                    continue;
+                }
+
+                if (allowedUuids.contains(entity.getUuid())) {
+                    continue;
+                }
+
+                entity.discard();
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // DeltaVisitor implementation
+        // -------------------------------------------------------------------------
+
         @Override
         public void visitBlock(final int localX, final int localY, final int localZ, final BlockState state) {
             if (isRedundantWithVanilla(localX, localY, localZ, state)) {
@@ -185,9 +242,7 @@ public final class ChunkRestorer {
             if (!applyBlockChange(chunk, chunkPosition, localX, localY, localZ, state, worldPos))
                 return;
 
-            if (runtimeDelta != null) {
-                runtimeDelta.addBlockChange(localX, localY, localZ, state, false);
-            }
+            copyBlockToRuntimeDelta(localX, localY, localZ, state);
         }
 
         @Override
@@ -199,6 +254,10 @@ public final class ChunkRestorer {
         public void visitEntity(final NbtCompound nbt) {
             restoreEntity(nbt);
         }
+
+        // -------------------------------------------------------------------------
+        // Block helpers
+        // -------------------------------------------------------------------------
 
         /**
          * Returns true if the given state exactly matches the vanilla worldgen state
@@ -220,22 +279,45 @@ public final class ChunkRestorer {
                 final int localZ,
                 final BlockState state) {
 
-            if (snapshot == null) return false;
+            if (snapshot == null)
+                return false;
+
             final BlockState vanillaState = snapshot.getVanillaState(localX, localY, localZ);
             return vanillaState != null && vanillaState.equals(state);
         }
+
+        /**
+         * Forwards a validated block change to the runtime delta in silent (no-dirty)
+         * mode.
+         * No-ops if the runtime delta is null.
+         *
+         * @param localX local X (0–15)
+         * @param localY absolute world Y
+         * @param localZ local Z (0–15)
+         * @param state  the applied block state
+         */
+        private void copyBlockToRuntimeDelta(
+                final int localX,
+                final int localY,
+                final int localZ,
+                final BlockState state) {
+
+            if (runtimeDelta != null) {
+                runtimeDelta.addBlockChange(localX, localY, localZ, state, false);
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Block entity restoration
+        // -------------------------------------------------------------------------
 
         /**
          * Restores a block entity from NBT into the chunk at the given local
          * coordinates.
          *
          * <p>
-         * Resolves and validates the block entity type from NBT <em>before</em>
-         * calling {@link BlockEntity#createFromNbt}, avoiding the internal
-         * {@link IllegalStateException} that would occur on a type/state mismatch.
          * Skips the position if the current block state does not support a block
-         * entity, or if the NBT id is absent, unparseable, unregistered, or
-         * incompatible with the current block state.
+         * entity. Skips and logs a warning if NBT deserialization returns null.
          *
          * @param localX local X (0–15)
          * @param localY absolute world Y
@@ -257,30 +339,11 @@ public final class ChunkRestorer {
                 return;
             }
 
-            // Resolve and validate the block entity type from NBT before deserialization.
-            // This avoids the internal IllegalStateException that createFromNbt throws
-            // on a type/state mismatch, which would silently return null and mask the error.
-            final String idStr = nbt.getString(BLOCK_ENTITY_ID_KEY).orElse(null);
-            if (idStr == null || idStr.isEmpty()) {
-                LOGGER.debug("Block entity NBT at {} has no id tag — skipping", worldPos);
-                return;
-            }
-
-            final Identifier id = Identifier.tryParse(idStr);
-            if (id == null) {
-                LOGGER.debug("Block entity NBT at {} has unparseable id '{}' — skipping", worldPos, idStr);
-                return;
-            }
-
-            final BlockEntityType<?> type = Registries.BLOCK_ENTITY_TYPE.get(id);
-            if (type == null) {
-                LOGGER.debug("Unknown block entity type '{}' at {} — skipping", idStr, worldPos);
-                return;
-            }
-
-            if (!type.supports(currentState)) {
-                LOGGER.debug("Skipping stale block entity '{}' at {} — block {} does not support this type",
-                        idStr, worldPos, currentState);
+            // Guard: verify the NBT id matches the block entity type the current
+            // block actually supports. A mismatch means stale or migrated delta
+            // data — skip silently rather than letting createFromNbt throw
+            // internally and return null.
+            if (!isNbtIdCompatibleWithState(nbt, currentState, worldPos)) {
                 return;
             }
 
@@ -301,13 +364,68 @@ public final class ChunkRestorer {
         }
 
         /**
+         * Returns {@code true} if the {@code id} field in {@code nbt} names a
+         * {@link BlockEntityType} that supports {@code state}'s block.
+         *
+         * <p>
+         * This prevents a mismatch between stale CIS delta data (e.g. a
+         * {@code sculk_sensor} entry at a position that is now a
+         * {@code sculk_catalyst}) from reaching
+         * {@link BlockEntity#createFromNbt}, which would throw an
+         * {@link IllegalStateException} internally and silently return
+         * {@code null}.
+         *
+         * @param nbt          the block entity NBT; must contain an {@code id} tag
+         * @param currentState the block state currently at the target position
+         * @param worldPos     position used only for logging on mismatch
+         * @return {@code true} if the NBT id is compatible with the block state
+         */
+        private boolean isNbtIdCompatibleWithState(
+                final NbtCompound nbt,
+                final BlockState currentState,
+                final BlockPos worldPos) {
+
+            final Optional<String> idStr = nbt.getString("id");
+            if (idStr.isEmpty()) {
+                LOGGER.debug("Block entity NBT at {} has no id tag — skipping", worldPos);
+                return false;
+            }
+
+            final String rawId = idStr.get();
+            final Identifier id = Identifier.tryParse(rawId);
+            if (id == null) {
+                LOGGER.debug("Block entity NBT at {} has unparseable id '{}' — skipping", worldPos, idStr);
+                return false;
+            }
+
+            final BlockEntityType<?> type = Registries.BLOCK_ENTITY_TYPE.get(id);
+            if (type == null) {
+                LOGGER.debug("Unknown block entity type '{}' at {} — skipping", idStr, worldPos);
+                return false;
+            }
+
+            if (!type.supports(currentState)) {
+                LOGGER.debug(
+                        "Skipping stale block entity '{}' at {} — block {} does not support this type",
+                        idStr, worldPos, currentState);
+                return false;
+            }
+
+            return true;
+        }
+
+
+        // -------------------------------------------------------------------------
+        // Entity restoration
+        // -------------------------------------------------------------------------
+
+        /**
          * Deserializes and spawns an entity from NBT, checking for UUID conflicts
          * to prevent duplicate spawning on re-load.
          *
          * <p>
-         * Uses Minecraft's built-in entity loading mechanism to handle all entity
-         * types, including those with passengers. UUID conflict detection guards
-         * against duplicate spawning when a delta is applied to a still-loaded chunk.
+         * Uses Minecraft's built-in {@link EntityType#loadEntityWithPassengers}
+         * to handle all entity types, including vehicles with passengers.
          *
          * <p>
          * <b>Thread safety:</b> Must be called on the server thread.
@@ -315,35 +433,54 @@ public final class ChunkRestorer {
          * @param nbt the serialized entity data
          */
         private void restoreEntity(final NbtCompound nbt) {
-            try {
-                EntityType.loadEntityWithPassengers(nbt, world, SpawnReason.LOAD, entity -> {
-                    final UUID uuid = entity.getUuid();
-                    if (world.getEntity(uuid) != null) return entity;
-                    world.spawnEntity(entity);
+            EntityType.loadEntityWithPassengers(nbt, world, SpawnReason.LOAD, entity -> {
+                if (isEntityAlreadySpawned(entity.getUuid()))
                     return entity;
-                });
+                world.spawnEntity(entity);
+                return entity;
+            });
 
-                if (runtimeDelta != null) {
-                    runtimeDelta.addPendingEntity(nbt);
-                }
-
-            } catch (final Exception e) {
-                LOGGER.error("Failed to restore entity in chunk {}", chunkPosition, e);
+            if (runtimeDelta != null) {
+                runtimeDelta.addPendingEntity(nbt);
             }
         }
 
-        /**
-         * Finalizes restoration by clearing the runtime delta's pending entity list.
-         *
-         * <p>
-         * Called after all delta entries have been visited to ensure the pending
-         * entity queue does not accumulate stale entries across successive
-         * restorations of the same chunk.
-         */
         public void finishRestoration() {
             if (runtimeDelta != null) {
                 runtimeDelta.clearPendingEntities();
             }
+        }
+
+        /**
+         * Returns true if an entity with the given UUID is already present in the
+         * world.
+         * Used to prevent duplicate spawning when a delta is applied more than once.
+         *
+         * @param uuid the UUID to check
+         * @return true if the entity already exists
+         */
+        private boolean isEntityAlreadySpawned(final java.util.UUID uuid) {
+            return world.getEntity(uuid) != null;
+        }
+
+        /**
+         * Extracts all valid entity UUIDs from the persisted entity payload list.
+         *
+         * @param entities persisted entity NBT payloads
+         * @return UUID allowlist for entities that should remain after cleanup
+         */
+        private Set<UUID> collectPersistedEntityUuids(final List<NbtCompound> entities) {
+            final Set<UUID> uuids = new HashSet<>();
+
+            for (final NbtCompound nbt : entities) {
+                if (nbt != null) {
+                    nbt.getIntArray("UUID")
+                            .map(Uuids::toUuid)
+                            .ifPresent(uuids::add);
+                }
+            }
+
+            return uuids;
         }
     }
 }

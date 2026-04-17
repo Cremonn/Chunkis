@@ -108,32 +108,66 @@ public final class VanillaChunkSnapshot {
         this.minSectionY = protoChunk.getBottomSectionCoord();
         this.sections = new SectionStorage[chunkSections.length];
 
-        int emptyCount = 0, uniformCount = 0, paletteCount = 0, fullCount = 0;
-        long totalMemory = 0;
+        buildSections(chunkSections);
+    }
+
+    /**
+     * Populates the {@link #sections} array from the given raw chunk sections,
+     * choosing optimal storage for each and logging a debug summary.
+     *
+     * @param chunkSections the raw sections from the ProtoChunk
+     */
+    private void buildSections(final ChunkSection[] chunkSections) {
+        final SectionStats stats = new SectionStats();
 
         for (int i = 0; i < chunkSections.length; i++) {
-            final ChunkSection raw = chunkSections[i];
-
-            if (raw == null || raw.isEmpty()) {
-                emptyCount++;
-                continue; // sections[i] stays null
-            }
-
-            final SectionStorage storage = createOptimalStorage(extractSectionStates(raw));
-            sections[i] = storage;
-            totalMemory += storage.getMemoryFootprint();
-
-            if (storage instanceof UniformSection) uniformCount++;
-            else if (storage instanceof PaletteSection) paletteCount++;
-            else fullCount++;
+            sections[i] = buildSection(chunkSections[i], stats);
         }
 
-        if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug(
-                    "Created VanillaChunkSnapshot: {} empty, {} uniform, {} palette, {} full (total: {} KB)",
-                    emptyCount, uniformCount, paletteCount, fullCount, totalMemory / 1024);
-        }
+        logDebugSummary(stats);
     }
+
+    /**
+     * Builds the optimal {@link SectionStorage} for a single chunk section,
+     * or returns null for empty sections. Updates the given stats counter.
+     *
+     * @param section the raw chunk section, may be null
+     * @param stats   mutable stats object to update
+     * @return the optimal storage, or null for empty/null sections
+     */
+    private static SectionStorage buildSection(final ChunkSection section, final SectionStats stats) {
+        if (isEmptySection(section)) {
+            stats.emptyCount++;
+            return null;
+        }
+
+        final BlockState[] states = extractSectionStates(section);
+        final SectionStorage storage = createOptimalStorage(states);
+
+        stats.totalMemory += storage.getMemoryFootprint();
+        stats.increment(storage);
+
+        return storage;
+    }
+
+    /**
+     * Emits a debug-level log summarizing section type counts and total memory.
+     * No-ops if debug logging is disabled.
+     *
+     * @param stats the collected section statistics
+     */
+    private static void logDebugSummary(final SectionStats stats) {
+        if (!LOGGER.isDebugEnabled()) return;
+
+        LOGGER.debug(
+                "Created VanillaChunkSnapshot: {} empty, {} uniform, {} palette, {} full (total: {} KB)",
+                stats.emptyCount, stats.uniformCount, stats.paletteCount, stats.fullCount,
+                stats.totalMemory / 1024);
+    }
+
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
 
     /**
      * Retrieves the original vanilla block state at the specified position.
@@ -153,14 +187,66 @@ public final class VanillaChunkSnapshot {
      * @return the original vanilla BlockState, or air if out of bounds
      */
     public BlockState getVanillaState(final int localX, final int worldY, final int localZ) {
-        final int sectionIndex = (worldY >> SECTION_Y_SHIFT) - minSectionY;
-        if (sectionIndex < 0 || sectionIndex >= sections.length) return AIR;
+        final int sectionIndex = toSectionIndex(worldY);
+
+        if (isOutOfBounds(sectionIndex)) return AIR;
 
         final SectionStorage section = sections[sectionIndex];
         if (section == null) return AIR;
 
+        return section.getBlockState(toBlockIndex(localX, worldY, localZ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Coordinate helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Converts a world Y coordinate to an index into {@link #sections}.
+     *
+     * @param worldY absolute world Y coordinate
+     * @return section array index (may be out of bounds)
+     */
+    private int toSectionIndex(final int worldY) {
+        return (worldY >> SECTION_Y_SHIFT) - minSectionY;
+    }
+
+    /**
+     * Returns true if the given section index is outside the valid range.
+     *
+     * @param sectionIndex the index to check
+     * @return true if out of bounds
+     */
+    private boolean isOutOfBounds(final int sectionIndex) {
+        return sectionIndex < 0 || sectionIndex >= sections.length;
+    }
+
+    /**
+     * Computes the bit-packed block index within a section from local coordinates.
+     * Formula: {@code (localY << 8) | (localZ << 4) | localX}.
+     *
+     * @param localX local X (0–15)
+     * @param worldY world Y (local Y extracted via bitmask)
+     * @param localZ local Z (0–15)
+     * @return packed index in range [0, 4095]
+     */
+    private static int toBlockIndex(final int localX, final int worldY, final int localZ) {
         final int localY = worldY & LOCAL_Y_MASK;
-        return section.getBlockState((localY << 8) | (localZ << 4) | localX);
+        return (localY << 8) | (localZ << 4) | localX;
+    }
+
+    // -------------------------------------------------------------------------
+    // Section extraction and storage selection
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if the given section is null or contains only air.
+     *
+     * @param section the section to test, may be null
+     * @return true if the section should be skipped
+     */
+    private static boolean isEmptySection(final ChunkSection section) {
+        return section == null || section.isEmpty();
     }
 
     /**
@@ -176,13 +262,16 @@ public final class VanillaChunkSnapshot {
      */
     private static BlockState[] extractSectionStates(final ChunkSection section) {
         final BlockState[] states = new BlockState[BLOCKS_PER_SECTION];
+
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
+                    // Bit-packed index: (Y << 8) | (Z << 4) | X
                     states[(y << 8) | (z << 4) | x] = section.getBlockState(x, y, z);
                 }
             }
         }
+
         return states;
     }
 
@@ -202,17 +291,32 @@ public final class VanillaChunkSnapshot {
      * @return the chosen storage implementation, never null
      */
     private static SectionStorage createOptimalStorage(final BlockState[] states) {
-        // Check uniform first — fastest possible path if all states match.
-        final BlockState first = states[0];
-        boolean uniform = true;
-        for (int i = 1; i < states.length; i++) {
-            if (states[i] != first) { uniform = false; break; }
+        if (isUniformSection(states)) {
+            return new UniformSection(states[0]);
         }
-        if (uniform) return new UniformSection(first);
 
         final BlockState[] palette = buildPalette(states);
-        // null palette signals unique count exceeded PALETTE_THRESHOLD.
-        return palette != null ? new PaletteSection(states, palette) : new FullSection(states);
+        if (palette == null) {
+            // Unique type count exceeded PALETTE_THRESHOLD — fall back to full array
+            return new FullSection(states);
+        }
+
+        return new PaletteSection(states, palette);
+    }
+
+    /**
+     * Returns true if all block states in the array are the same object reference.
+     * Uses identity comparison since block states are interned by the registry.
+     *
+     * @param states the states to check
+     * @return true if all elements are identical
+     */
+    private static boolean isUniformSection(final BlockState[] states) {
+        final BlockState first = states[0];
+        for (int i = 1; i < states.length; i++) {
+            if (states[i] != first) return false;
+        }
+        return true;
     }
 
     /**
@@ -227,23 +331,49 @@ public final class VanillaChunkSnapshot {
      * @return a trimmed palette array, or null if unique count exceeds {@value #PALETTE_THRESHOLD}
      */
     private static BlockState[] buildPalette(final BlockState[] states) {
-        // Pre-allocate at threshold + 1 so we can detect overflow without resizing.
+        // Pre-allocate at threshold + 1 so we can detect overflow without resizing
         final BlockState[] unique = new BlockState[PALETTE_THRESHOLD + 1];
         unique[0] = states[0];
         int uniqueCount = 1;
 
-        outer:
         for (int i = 1; i < states.length; i++) {
             final BlockState state = states[i];
-            for (int j = 0; j < uniqueCount; j++) {
-                if (unique[j] == state) continue outer;
+
+            if (!isPresentInPalette(state, unique, uniqueCount)) {
+                if (uniqueCount >= PALETTE_THRESHOLD) {
+                    // Too many unique types — signal caller to use FullSection
+                    return null;
+                }
+                unique[uniqueCount++] = state;
             }
-            if (uniqueCount >= PALETTE_THRESHOLD) return null;
-            unique[uniqueCount++] = state;
         }
 
         return Arrays.copyOf(unique, uniqueCount);
     }
+
+    /**
+     * Returns true if the given state is already present in the palette
+     * using identity comparison.
+     *
+     * @param state       the state to search for
+     * @param palette     the palette to search within
+     * @param paletteSize the number of valid entries in the palette
+     * @return true if the state is found
+     */
+    private static boolean isPresentInPalette(
+            final BlockState state,
+            final BlockState[] palette,
+            final int paletteSize) {
+
+        for (int j = 0; j < paletteSize; j++) {
+            if (palette[j] == state) return true;
+        }
+        return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Storage implementations
+    // -------------------------------------------------------------------------
 
     /**
      * Base interface for section storage implementations.
@@ -284,6 +414,7 @@ public final class VanillaChunkSnapshot {
 
         @Override
         public long getMemoryFootprint() {
+            // One object reference
             return 8L;
         }
     }
@@ -313,21 +444,46 @@ public final class VanillaChunkSnapshot {
 
         /**
          * Constructs a {@link PaletteSection} from the full state array and
-         * its pre-built palette. Maps each state to its palette index via
-         * identity comparison.
+         * its pre-built palette. Maps each state to its palette index.
          *
          * @param states  the full {@value #BLOCKS_PER_SECTION}-element state array
          * @param palette the unique state palette
          */
         PaletteSection(final BlockState[] states, final BlockState[] palette) {
             this.palette = palette;
-            this.indices = new byte[BLOCKS_PER_SECTION];
+            this.indices = buildIndexArray(states, palette);
+        }
+
+        /**
+         * Builds the byte index array by mapping each state in {@code states}
+         * to its position in {@code palette} via identity comparison.
+         *
+         * @param states  the full state array
+         * @param palette the unique state palette
+         * @return the packed index array
+         */
+        private static byte[] buildIndexArray(final BlockState[] states, final BlockState[] palette) {
+            final byte[] indices = new byte[BLOCKS_PER_SECTION];
             for (int i = 0; i < states.length; i++) {
-                final BlockState state = states[i];
-                for (byte j = 0; j < palette.length; j++) {
-                    if (palette[j] == state) { indices[i] = j; break; }
-                }
+                indices[i] = findPaletteIndex(states[i], palette);
             }
+            return indices;
+        }
+
+        /**
+         * Returns the palette index for the given state as a byte.
+         * Uses identity comparison since block states are interned.
+         *
+         * @param state   the state to locate
+         * @param palette the palette to search
+         * @return the palette index cast to byte
+         */
+        private static byte findPaletteIndex(final BlockState state, final BlockState[] palette) {
+            for (byte j = 0; j < palette.length; j++) {
+                if (palette[j] == state) return j;
+            }
+            // Should never reach here if palette was built from the same states array
+            return 0;
         }
 
         @Override
@@ -338,6 +494,7 @@ public final class VanillaChunkSnapshot {
 
         @Override
         public long getMemoryFootprint() {
+            // palette references + one byte per block
             return (long) palette.length * 8 + BLOCKS_PER_SECTION;
         }
     }
@@ -370,7 +527,40 @@ public final class VanillaChunkSnapshot {
 
         @Override
         public long getMemoryFootprint() {
+            // 4096 object references × 8 bytes each
             return BLOCKS_PER_SECTION * 8L;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Construction statistics (local, never escapes)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mutable accumulator for per-section type counts and total memory,
+     * used only during construction to produce the debug summary.
+     * Never escapes the constructor scope.
+     */
+    private static final class SectionStats {
+        int emptyCount;
+        int uniformCount;
+        int paletteCount;
+        int fullCount;
+        long totalMemory;
+
+        /**
+         * Increments the counter corresponding to the given storage type.
+         *
+         * @param storage the storage whose type counter should be incremented
+         */
+        void increment(final SectionStorage storage) {
+            if (storage instanceof UniformSection) {
+                uniformCount++;
+            } else if (storage instanceof PaletteSection) {
+                paletteCount++;
+            } else {
+                fullCount++;
+            }
         }
     }
 }

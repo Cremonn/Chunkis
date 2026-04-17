@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.entity;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.util.CisNbtUtil;
 import io.liparakis.chunkis.util.GlobalChunkTracker;
 import net.minecraft.block.BlockState;
@@ -64,12 +64,15 @@ public abstract class EntityMixin {
         if (!(world instanceof ServerWorld serverWorld))
             return false;
 
-        assert serverWorld.getServer() != null;
+        // Entities can be initialized on worker threads during chunk
+        // generation/loading.
+        // We must only capture on the main server thread.
         if (serverWorld.getServer().getThread() != Thread.currentThread())
             return false;
 
         Entity self = (Entity) (Object) this;
-        if (self.age == 0 && (getX() == 0 && getY() == 0 && getZ() == 0))
+        // Avoid capturing during entity construction or before it's properly placed
+        if (self.age == 0 && (self.getX() == 0 && self.getY() == 0 && self.getZ() == 0))
             return false;
 
         if (self instanceof PlayerEntity)
@@ -77,6 +80,7 @@ public abstract class EntityMixin {
         if (isRemoved() || hasVehicle())
             return false;
 
+        // Prevent generating chunks from being deadlocked when checking entity chunks
         BlockPos pos = getBlockPos();
         return serverWorld.isChunkLoaded(ChunkPos.toLong(pos));
     }
@@ -112,6 +116,8 @@ public abstract class EntityMixin {
                     this.chunkis$lastCaptureChunk = chunk.getPos();
                 }
             } catch (Exception e) {
+                // Downgrade to debug: Entities may temporarily have invalid state (e.g. during
+                // construction/loading)
                 Chunkis.LOGGER.debug("Chunkis: Skipped proactive capture for entity {} (invalid state)", self.getId());
             }
         }
@@ -136,7 +142,6 @@ public abstract class EntityMixin {
 
     /**
      * Hook into setPos to track significant movement and chunk border crossing.
-     * x, y, z are the new position — use them directly instead of getPos().
      */
     @Inject(method = "setPos", at = @At("RETURN"))
     private void chunkis$onSetPos(double x, double y, double z, CallbackInfo ci) {
@@ -148,20 +153,25 @@ public abstract class EntityMixin {
         ChunkPos currentChunk = new ChunkPos(getBlockPos());
 
         if (chunkis$lastCapturePos == null || chunkis$lastCaptureChunk == null) {
+            // Initial capture happens mostly in ServerWorldMixin onEntityAdded
+            // But we can capture here if missing
             return;
         }
 
         boolean chunkChanged = !currentChunk.equals(chunkis$lastCaptureChunk);
         double distSq = currentPos.squaredDistanceTo(chunkis$lastCapturePos);
 
+        // Capture if moved > 1 block or crossed chunk boundary
         if (chunkChanged || distSq > 1.0) {
             ServerWorld serverWorld = (ServerWorld) world;
 
             if (chunkChanged) {
+                // Remove from old chunk
                 WorldChunk oldChunk = serverWorld.getWorldChunk(chunkis$lastCaptureChunk.getBlockPos(0, 0, 0));
                 removeFromDelta(oldChunk);
             }
 
+            // Add/update in new chunk
             WorldChunk newChunk = serverWorld.getWorldChunk(currentChunk.getBlockPos(0, 0, 0));
             captureToDelta(newChunk);
         }

@@ -14,14 +14,14 @@ import java.io.*;
  * <p>
  * Uses direct streaming for {@link DataOutputStream}/{@link DataInputStream},
  * falling back to buffering only when the output/input is a generic
- * {@link DataOutput}/{@link DataInput} (e.g., {@code RandomAccessFile}).
+ * {@link DataOutput}/{@link DataInput} (e.g., RandomAccessFile).
  *
  * <p>
- * <b>Thread safety:</b> Thread-local buffer reuse means no state is shared
- * across threads. No world or chunk references are retained.
+ * Thread-safe via thread-local buffer reuse. Buffers are not shared across
+ * threads, and no world or chunk references are retained.
  *
  * @author Liparakis
- * @version 1.2
+ * @version 1.1
  */
 public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
 
@@ -33,21 +33,28 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
 
     /**
      * Thread-local pool of reusable byte buffers.
-     * Avoids per-call allocation on the common write/read path. Each thread
-     * retains its own {@link BufferHolder} for the lifetime of the thread.
+     * Avoids per-call allocation for the common write/read path.
+     * Each thread retains its own {@link BufferHolder} for the lifetime of the
+     * thread.
      */
     private static final ThreadLocal<BufferHolder> BUFFER_POOL = ThreadLocal.withInitial(BufferHolder::new);
+
+    // -------------------------------------------------------------------------
+    // NbtAdapter API
+    // -------------------------------------------------------------------------
 
     /**
      * Writes the given NBT compound to the given output.
      *
      * <p>
-     * Dispatches to {@link #writeStreaming} if output is a {@link DataOutputStream},
+     * Dispatches to {@link #writeStreaming} if output is a
+     * {@link DataOutputStream},
      * otherwise falls back to {@link #writeBuffered}.
      *
      * @param nbt    the NBT compound to write
      * @param output the target output
-     * @throws IOException if the write fails or the NBT exceeds {@link #MAX_NBT_SIZE}
+     * @throws IOException if the write fails or the NBT exceeds
+     *                     {@link #MAX_NBT_SIZE}
      */
     @Override
     public void write(final NbtCompound nbt, final DataOutput output) throws IOException {
@@ -62,7 +69,6 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
      * Reads an NBT compound from the given input.
      *
      * <p>
-     * Validates the declared payload length before any allocation or read.
      * Dispatches to {@link #readStreaming} if input is a {@link DataInputStream},
      * otherwise falls back to {@link #readBuffered}.
      *
@@ -73,13 +79,15 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
     @Override
     public NbtCompound read(final DataInput input) throws IOException {
         final int length = input.readInt();
-        if (length < 0 || length > MAX_NBT_SIZE) {
-            throw new IOException("Invalid NBT size: " + length + " (must be 0–" + MAX_NBT_SIZE + ")");
-        }
+        validateReadLength(length);
         return input instanceof DataInputStream dis
                 ? readStreaming(dis, length)
                 : readBuffered(input, length);
     }
+
+    // -------------------------------------------------------------------------
+    // Write paths
+    // -------------------------------------------------------------------------
 
     /**
      * Writes NBT to a {@link DataOutputStream} using the thread-local buffer.
@@ -94,15 +102,13 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
      * @throws IOException if write fails or payload exceeds {@link #MAX_NBT_SIZE}
      */
     private void writeStreaming(final NbtCompound nbt, final DataOutputStream output) throws IOException {
-        final BufferHolder holder = BUFFER_POOL.get();
-        holder.reset();
+        final BufferHolder holder = getThreadBuffer();
         NbtIo.writeCompressed(nbt, holder.buffer);
 
         final int size = holder.buffer.size();
-        if (size > MAX_NBT_SIZE) {
-            throw new IOException("NBT data exceeds maximum allowed size: " + size + " bytes (max: " + MAX_NBT_SIZE + ")");
-        }
+        validateNbtSize(size);
 
+        // Write length prefix so the reader can allocate or bound correctly
         output.writeInt(size);
         holder.buffer.writeTo(output);
     }
@@ -113,30 +119,31 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
      *
      * <p>
      * Used when the output is not a {@link DataOutputStream} (e.g.,
-     * {@code RandomAccessFile}).
+     * RandomAccessFile).
      *
      * @param nbt    the NBT compound to write
      * @param output the target output
      * @throws IOException if write fails or payload exceeds {@link #MAX_NBT_SIZE}
      */
     private void writeBuffered(final NbtCompound nbt, final DataOutput output) throws IOException {
-        final BufferHolder holder = BUFFER_POOL.get();
-        holder.reset();
+        final BufferHolder holder = getThreadBuffer();
         NbtIo.writeCompressed(nbt, holder.buffer);
 
         final byte[] data = holder.buffer.toByteArray();
-        if (data.length > MAX_NBT_SIZE) {
-            throw new IOException("NBT data exceeds maximum allowed size: " + data.length + " bytes (max: " + MAX_NBT_SIZE + ")");
-        }
+        validateNbtSize(data.length);
 
         output.writeInt(data.length);
         output.write(data);
     }
 
+    // -------------------------------------------------------------------------
+    // Read paths
+    // -------------------------------------------------------------------------
+
     /**
      * Reads NBT directly from a {@link DataInputStream} using a
-     * {@link BoundedInputStream} to prevent over-reading and maintain stream
-     * synchronization.
+     * {@link BoundedInputStream}
+     * to prevent over-reading and maintain stream synchronization.
      *
      * @param input  the source stream
      * @param length the expected byte length of the NBT payload
@@ -144,17 +151,21 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
      * @throws IOException if read or decompression fails
      */
     private NbtCompound readStreaming(final DataInputStream input, final int length) throws IOException {
-        // BoundedInputStream wraps without closing the underlying stream (caller owns lifecycle).
+        // BoundedInputStream wraps without closing the underlying stream (caller owns
+        // lifecycle)
         try (BoundedInputStream bounded = new BoundedInputStream(input, length)) {
             final NbtCompound nbt = NbtIo.readCompressed(bounded, NbtSizeTracker.of(MAX_NBT_SIZE));
-            // Drain any remaining bytes to keep the stream position consistent.
-            while (bounded.read() != -1) { /* intentional drain */ }
+            // Drain any remaining bytes to keep the stream position consistent
+            while (bounded.read() != -1) {
+                // Empty body intentionally
+            }
             return nbt;
         }
     }
 
     /**
-     * Reads NBT from a generic {@link DataInput} by buffering the payload bytes first.
+     * Reads NBT from a generic {@link DataInput} by buffering the payload bytes
+     * first.
      *
      * @param input  the source input
      * @param length the byte length of the NBT payload to read
@@ -162,8 +173,7 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
      * @throws IOException if read or decompression fails
      */
     private NbtCompound readBuffered(final DataInput input, final int length) throws IOException {
-        final BufferHolder holder = BUFFER_POOL.get();
-        holder.reset();
+        final BufferHolder holder = getThreadBuffer();
         final byte[] buffer = holder.getReadBuffer(length);
 
         input.readFully(buffer, 0, length);
@@ -173,17 +183,88 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Validation helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Throws {@link IOException} if the given NBT payload size exceeds
+     * {@link #MAX_NBT_SIZE}.
+     *
+     * @param size the compressed payload size in bytes
+     * @throws IOException if size exceeds the limit
+     */
+    private static void validateNbtSize(final int size) throws IOException {
+        if (size > MAX_NBT_SIZE) {
+            throw new IOException(
+                    "NBT data exceeds maximum allowed size: " + size + " bytes (max: " + MAX_NBT_SIZE + ")");
+        }
+    }
+
+    /**
+     * Throws {@link IOException} if the declared NBT length read from the stream
+     * is negative or exceeds {@link #MAX_NBT_SIZE}.
+     *
+     * <p>
+     * Negative values indicate stream corruption; oversized values guard against
+     * attempting to allocate excessively large buffers.
+     *
+     * @param length the declared payload length read from the stream
+     * @throws IOException if the length is invalid
+     */
+    private static void validateReadLength(final int length) throws IOException {
+        if (isInvalidLength(length)) {
+            throw new IOException(
+                    "Invalid NBT size: " + length + " (must be 0–" + MAX_NBT_SIZE + ")");
+        }
+    }
+
+    /**
+     * Returns true if the given length is outside the valid range [0,
+     * MAX_NBT_SIZE].
+     *
+     * @param length the length to check
+     * @return true if the length is negative or exceeds the maximum
+     */
+    private static boolean isInvalidLength(final int length) {
+        return length < 0 || length > MAX_NBT_SIZE;
+    }
+
+    // -------------------------------------------------------------------------
+    // Thread-local buffer access
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns the thread-local {@link BufferHolder}, reset and ready for use.
+     *
+     * <p>
+     * Centralizes ThreadLocal access and ensures {@link BufferHolder#reset()} is
+     * always called before use, preventing stale data from a previous operation.
+     *
+     * @return a reset BufferHolder for the current thread
+     */
+    private static BufferHolder getThreadBuffer() {
+        final BufferHolder holder = BUFFER_POOL.get();
+        holder.reset();
+        return holder;
+    }
+
+    // -------------------------------------------------------------------------
+    // Inner types
+    // -------------------------------------------------------------------------
+
     /**
      * Holds reusable write and read buffers for a single thread.
      *
      * <p>
-     * The write buffer ({@link #buffer}) is a resettable {@link ByteArrayOutputStream}.
+     * The write buffer ({@link #buffer}) is a resettable
+     * {@link ByteArrayOutputStream}.
      * The read buffer ({@link #readBuffer}) grows on demand but never shrinks,
      * amortizing allocation cost across repeated calls.
      */
     private static final class BufferHolder {
 
-        /** Reusable write buffer. Always reset before use. */
+        /** Reusable write buffer. Always reset via {@link #reset()} before use. */
         final ByteArrayOutputStream buffer = new ByteArrayOutputStream(BUFFER_SIZE);
 
         /** Reusable read buffer. Grows as needed; never shrinks. */
@@ -195,7 +276,8 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
         }
 
         /**
-         * Returns the read buffer, growing it if the requested size exceeds capacity.
+         * Returns the read buffer, growing it if the requested size exceeds its
+         * capacity.
          *
          * @param size the minimum required capacity
          * @return a byte array of at least {@code size} bytes
@@ -232,24 +314,28 @@ public final class FabricNbtAdapter implements NbtAdapter<NbtCompound> {
 
         @Override
         public int read() throws IOException {
-            if (remaining <= 0) return -1;
+            if (remaining <= 0)
+                return -1;
             final int result = super.read();
-            if (result != -1) remaining--;
+            if (result != -1)
+                remaining--;
             return result;
         }
 
         @Override
         public int read(final byte @NotNull [] b, final int off, final int len) throws IOException {
-            if (remaining <= 0) return -1;
+            if (remaining <= 0)
+                return -1;
             final int toRead = (int) Math.min(len, remaining);
             final int result = super.read(b, off, toRead);
-            if (result > 0) remaining -= result;
+            if (result > 0)
+                remaining -= result;
             return result;
         }
 
         /**
-         * Intentional no-op: the caller owns the underlying {@link DataInputStream}
-         * lifecycle and must not have it closed here.
+         * Intentional no-op: the caller (readStreaming) owns the underlying
+         * {@link DataInputStream} lifecycle and must not have it closed here.
          */
         @Override
         public void close() {

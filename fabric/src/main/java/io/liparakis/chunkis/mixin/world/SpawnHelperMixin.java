@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
-import io.liparakis.chunkis.model.ChunkDelta;
+import io.liparakis.chunkis.core.ChunkDelta;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.random.Random;
@@ -52,7 +52,7 @@ public class SpawnHelperMixin {
      * so casting to {@code ServerWorld} would fail.
      *
      * @param world    the world access context (often ChunkRegion during generation)
-     * @param biome    the biome for spawn logic
+     * @param biomeEntry    the biome for spawn logic
      * @param chunkPos the chunk position being populated
      * @param random   the random generator for spawning
      * @param ci       callback info to cancel population
@@ -60,7 +60,7 @@ public class SpawnHelperMixin {
     @Inject(method = "populateEntities", at = @At("HEAD"), cancellable = true)
     private static void chunkis$onPopulateEntities(
             final ServerWorldAccess world,
-            final RegistryEntry<Biome> biome,
+            final RegistryEntry<Biome> biomeEntry,
             final ChunkPos chunkPos,
             final Random random,
             final CallbackInfo ci) {
@@ -106,7 +106,7 @@ public class SpawnHelperMixin {
             return false;
         }
         final ChunkDelta<?, ?> delta = deltaDuck.chunkis$getDelta();
-        if (delta == null || delta.isEmpty()) {
+        if (delta == null || !delta.shouldSuppressInitialRepopulation()) {
             return false;
         }
         ci.cancel();
