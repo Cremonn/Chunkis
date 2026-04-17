@@ -1,5 +1,6 @@
 package io.liparakis.chunkis.spi;
 
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -34,6 +35,9 @@ public interface BlockStateAdapter<B, S, P> {
      * Returns a new state with the property set to the value at the given index.
      */
     S withProperty(S state, P property, int valueIndex);
+
+    /** Returns a comparator for sorting property values deterministically. */
+    Comparator<Object> getValueComparator();
 
     /** Checks if the state is considered air/empty. */
     boolean isAir(S state);

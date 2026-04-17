@@ -1,6 +1,6 @@
 package io.liparakis.chunkis.storage;
 
-import io.liparakis.chunkis.model.CisChunkPos;
+import io.liparakis.chunkis.core.CisChunkPos;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -52,7 +52,7 @@ final class RegionFile implements AutoCloseable {
      * Initializes a new region file with an empty header.
      */
     private void initializeNewRegion() throws IOException {
-        writeFullyAt(channel, ByteBuffer.allocate(HEADER_SIZE), 0);
+        channel.write(ByteBuffer.allocate(HEADER_SIZE), 0);
     }
 
     /**
@@ -102,7 +102,7 @@ final class RegionFile implements AutoCloseable {
         int offset = calculateWriteOffset(index, dataLength);
 
         if (dataLength > 0) {
-            writeFullyAt(channel, ByteBuffer.wrap(data), offset);
+            channel.write(ByteBuffer.wrap(data), offset);
         }
 
         updateHeader(index, offset, dataLength);
@@ -142,7 +142,7 @@ final class RegionFile implements AutoCloseable {
         headerBuffer.putInt(lengths[index]);
         headerBuffer.flip();
 
-        writeFullyAt(channel, headerBuffer, (long) index * HEADER_ENTRY_SIZE);
+        channel.write(headerBuffer, (long) index * HEADER_ENTRY_SIZE);
     }
 
     /**
@@ -184,7 +184,7 @@ final class RegionFile implements AutoCloseable {
                     StandardOpenOption.WRITE)) {
 
                 // placeholder header
-                writeFully(dest, ByteBuffer.allocate(HEADER_SIZE));
+                dest.write(ByteBuffer.allocate(HEADER_SIZE));
 
                 int currentOffset = HEADER_SIZE;
                 ByteBuffer newHeader = ByteBuffer.allocate(HEADER_SIZE);
@@ -195,7 +195,7 @@ final class RegionFile implements AutoCloseable {
                             ByteBuffer chunkData = ByteBuffer.allocate(lengths[i]);
                             channel.read(chunkData, offsets[i]);
                             chunkData.flip();
-                            writeFully(dest, chunkData);
+                            dest.write(chunkData);
 
                             newHeader.putInt(currentOffset);
                             newHeader.putInt(lengths[i]);
@@ -212,7 +212,7 @@ final class RegionFile implements AutoCloseable {
 
                 newHeader.flip();
                 dest.position(0);
-                writeFully(dest, newHeader);
+                dest.write(newHeader);
                 dest.force(true);
             }
 
@@ -240,27 +240,6 @@ final class RegionFile implements AutoCloseable {
                             .error("CRITICAL: Failed to reopen region after failed compaction", ex);
                 }
             }
-        }
-    }
-
-    /**
-     * Writes a buffer fully to the channel at the given position,
-     * retrying if the write is short (as permitted by FileChannel contract).
-     */
-    private static void writeFullyAt(FileChannel ch, ByteBuffer buf, long position) throws IOException {
-        while (buf.hasRemaining()) {
-            position += ch.write(buf, position);
-        }
-    }
-
-    /**
-     * Writes a buffer fully to the channel at the current position,
-     * retrying if the write is short.
-     */
-    @SuppressWarnings("all")
-    private static void writeFully(FileChannel ch, ByteBuffer buf) throws IOException {
-        while (buf.hasRemaining()) {
-            ch.write(buf);
         }
     }
 
