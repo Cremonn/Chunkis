@@ -58,10 +58,14 @@ public abstract class EntityMixin {
         if (!(world instanceof ServerWorld serverWorld))
             return false;
 
+        // Entities can be initialized on worker threads during chunk
+        // generation/loading.
+        // We must only capture on the main server thread.
         if (serverWorld.getServer().getThread() != Thread.currentThread())
             return false;
 
         Entity self = (Entity) (Object) this;
+        // Avoid capturing during entity construction or before it's properly placed
         if (self.age == 0 && (self.getX() == 0 && self.getY() == 0 && self.getZ() == 0))
             return false;
 
@@ -70,6 +74,7 @@ public abstract class EntityMixin {
         if (isRemoved() || hasVehicle())
             return false;
 
+        // Prevent generating chunks from being deadlocked when checking entity chunks
         BlockPos pos = getBlockPos();
         return serverWorld.isChunkLoaded(ChunkPos.toLong(pos));
     }
@@ -86,17 +91,17 @@ public abstract class EntityMixin {
         ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) deltaDuck.chunkis$getDelta();
         if (delta != null) {
             Entity self = (Entity) (Object) this;
-            try (ErrorReporter.Logging logging = new ErrorReporter.Logging(
-                    self.getErrorReporterContext(), Chunkis.LOGGER)) {
+            try {
+                try (ErrorReporter.Logging logging =
+                             new ErrorReporter.Logging(self.getErrorReporterContext(), Chunkis.LOGGER)) {
+                    final NbtWriteView writeView = NbtWriteView.create(logging, self.getRegistryManager());
+                    self.writeData(writeView);
 
-                final NbtWriteView writeView = NbtWriteView.create(
-                        logging,
-                        self.getRegistryManager());
+                    final NbtCompound nbt = writeView.getNbt();
+                    if (nbt.isEmpty()) {
+                        return;
+                    }
 
-                self.writeData(writeView);
-
-                final NbtCompound nbt = writeView.getNbt();
-                if (!nbt.isEmpty()) {
                     CisNbtUtil.ensureEntityIdPresent(nbt, self);
                     delta.putEntity(self.getId(), nbt);
                     GlobalChunkTracker.markDirty(chunk);
@@ -105,6 +110,8 @@ public abstract class EntityMixin {
                     this.chunkis$lastCaptureChunk = chunk.getPos();
                 }
             } catch (Exception e) {
+                // Downgrade to debug: Entities may temporarily have invalid state (e.g. during
+                // construction/loading)
                 Chunkis.LOGGER.debug("Chunkis: Skipped proactive capture for entity {} (invalid state)", self.getId());
             }
         }
@@ -139,20 +146,25 @@ public abstract class EntityMixin {
         ChunkPos currentChunk = new ChunkPos(getBlockPos());
 
         if (chunkis$lastCapturePos == null || chunkis$lastCaptureChunk == null) {
+            // Initial capture happens mostly in ServerWorldMixin onEntityAdded
+            // But we can capture here if missing
             return;
         }
 
         boolean chunkChanged = !currentChunk.equals(chunkis$lastCaptureChunk);
         double distSq = currentPos.squaredDistanceTo(chunkis$lastCapturePos);
 
+        // Capture if moved > 1 block or crossed chunk boundary
         if (chunkChanged || distSq > 1.0) {
             ServerWorld serverWorld = (ServerWorld) world;
 
             if (chunkChanged) {
+                // Remove from old chunk
                 WorldChunk oldChunk = serverWorld.getWorldChunk(chunkis$lastCaptureChunk.getBlockPos(0, 0, 0));
                 removeFromDelta(oldChunk);
             }
 
+            // Add/update in new chunk
             WorldChunk newChunk = serverWorld.getWorldChunk(currentChunk.getBlockPos(0, 0, 0));
             captureToDelta(newChunk);
         }

@@ -1,5 +1,6 @@
 package io.liparakis.chunkis.storage.codec;
 
+import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.core.BlockInstruction;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.Palette;
@@ -85,15 +86,12 @@ public abstract class AbstractCisDecoder<S, N> {
 
         int offset = validateHeader(data);
         ChunkDelta<S, N> delta = new ChunkDelta<>();
+        delta.setSourceVersion(decodedVersion);
         Palette<S> palette = delta.getBlockPalette();
 
         offset = decodeGlobalPalette(data, offset, palette);
         offset = decodeSections(data, offset, delta);
         decodeBlockEntitiesAndEntities(data, offset, delta);
-
-        if (decodedVersion < CisConstants.VERSION) {
-            delta.setNeedsMigration(true);
-        }
 
         delta.markSaved();
         return delta;
@@ -247,7 +245,12 @@ public abstract class AbstractCisDecoder<S, N> {
     }
 
     /**
-     * Decodes block entities and global entities from the stream.
+     * Decodes block entities, global entities, and optional chunk metadata from the serialized chunk
+     * data stream starting at the given offset.
+     *
+     * @param data   raw serialized chunk bytes
+     * @param offset byte offset into {@code data} where the block entity section begins
+     * @param delta  target delta to populate
      */
     private void decodeBlockEntitiesAndEntities(byte[] data, int offset, ChunkDelta<S, N> delta) {
         if (offset >= data.length) {
@@ -257,44 +260,80 @@ public abstract class AbstractCisDecoder<S, N> {
         try (DataInputStream dis = new DataInputStream(
                 new ByteArrayInputStream(data, offset, data.length - offset))) {
 
-            // Decode block entities
-            int beCount = dis.readInt();
-
-            for (int i = 0; i < beCount; i++) {
-                int packedPos = dis.readInt();
-                byte x = (byte) BlockInstruction.unpackX(packedPos);
-                int y = BlockInstruction.unpackY(packedPos);
-                byte z = (byte) BlockInstruction.unpackZ(packedPos);
-
-                try {
-                    N nbt = nbtAdapter.read(dis);
-                    delta.addBlockEntityData(x, y, z, nbt);
-                } catch (IOException e) {
-                    // Log minimal info if decoding fails, but don't dump hex
-                    io.liparakis.chunkis.Chunkis.LOGGER.warn(
-                            "Failed to decode block entity {}/{} at pos {}/{}/{}",
-                            i, beCount, x, y, z);
-                    throw e;
-                }
-            }
-
-            // Decode global entities
-            try {
-                int entityCount = dis.readInt();
-                if (entityCount > 0 && entityCount < 10000) {
-                    List<N> entities = new ArrayList<>(entityCount);
-                    for (int i = 0; i < entityCount; i++) {
-                        entities.add(nbtAdapter.read(dis));
-                    }
-                    delta.setEntities(entities, false);
-                }
-            } catch (EOFException e) {
-                // End of stream is acceptable - not all CIS files have entity data
+            decodeBlockEntities(dis, delta);
+            decodeEntities(dis, delta);
+            if (decodedVersion >= 9) {
+                decodeChunkMetadata(dis, delta, offset);
             }
 
         } catch (IOException e) {
-            io.liparakis.chunkis.Chunkis.LOGGER.warn("Failed to decode block/entity data at offset {}: {}", offset,
-                    e.getMessage());
+            Chunkis.LOGGER.warn("Failed to decode block/entity data at offset {}: {}", offset, e.getMessage());
+        }
+    }
+
+    /**
+     * Reads the block entity section from the stream and registers each entry with the delta.
+     * Each block entity is stored as a packed 32-bit position followed by its NBT payload.
+     */
+    private void decodeBlockEntities(DataInputStream dis, ChunkDelta<S, N> delta) throws IOException {
+        int count = dis.readInt();
+
+        for (int i = 0; i < count; i++) {
+            int packedPos = dis.readInt();
+            byte x = (byte) BlockInstruction.unpackX(packedPos);
+            int  y =         BlockInstruction.unpackY(packedPos);
+            byte z = (byte) BlockInstruction.unpackZ(packedPos);
+
+            try {
+                delta.addBlockEntityData(x, y, z, nbtAdapter.read(dis));
+            } catch (IOException e) {
+                Chunkis.LOGGER.warn("Failed to decode block entity {}/{} at {}/{}/{}", i, count, x, y, z);
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * Reads the entity section from the stream, if present.
+     * Entity data is optional and bounded to a sanity limit of 10 000 entries to guard against
+     * corrupt or malicious payloads. An {@link EOFException} is silently ignored — older CIS
+     * files may not include this section.
+     */
+    private void decodeEntities(DataInputStream dis, ChunkDelta<S, N> delta) throws IOException {
+        final int ENTITY_COUNT_LIMIT = 10_000;
+
+        try {
+            int count = dis.readInt();
+            if (count <= 0 || count > ENTITY_COUNT_LIMIT) {
+                return;
+            }
+
+            List<N> entities = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                entities.add(nbtAdapter.read(dis));
+            }
+            delta.setEntities(entities, false);
+
+        } catch (EOFException ignored) {
+            // Pre-entity CIS files end here — not an error
+        }
+    }
+
+    /**
+     * Reads the chunk metadata section introduced in CIS v9.
+     * A leading boolean signals whether metadata is present; an {@link EOFException} indicates
+     * a v9 file written before metadata was made mandatory and is treated as absent.
+     *
+     * @param offset original decode offset, used only for the warning message
+     */
+    private void decodeChunkMetadata(DataInputStream dis, ChunkDelta<S, N> delta, int offset) throws IOException {
+        try {
+            if (dis.readBoolean()) {
+                delta.setChunkMetadata(nbtAdapter.read(dis), false);
+            }
+        } catch (EOFException e) {
+            Chunkis.LOGGER.warn(
+                    "CIS v9 chunk metadata missing at offset {} — treating as absent", offset);
         }
     }
 
