@@ -107,9 +107,7 @@ public final class ClientDeltaNetworking {
         }
 
         final var client = context.client();
-        if (client != null) {
-            client.execute(() -> processChunkDelta(payload, client.world));
-        }
+        client.execute(() -> processChunkDelta(payload, client.world));
     }
 
     // -------------------------------------------------------------------------
