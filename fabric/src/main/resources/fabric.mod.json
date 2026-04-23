@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "chunkis",
-  "version": "2.1.0",
+   "version": "2.2.0",
   "name": "Chunkis",
   "description": "Chunkis is a mod that adds chunk saving and loading to Minecraft.",
   "authors": [
@@ -23,7 +23,7 @@
   ],
   "depends": {
     "fabricloader": ">=0.16.5",
-    "minecraft": "~1.21.2",
+    "minecraft": "~1.21.6",
     "java": ">=21",
     "fabric-api": "*"
   }

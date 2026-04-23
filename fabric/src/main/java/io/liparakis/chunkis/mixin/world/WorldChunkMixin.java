@@ -9,20 +9,28 @@ import io.liparakis.chunkis.util.GlobalChunkTracker;
 import io.liparakis.chunkis.util.LeafTickContext;
 import io.liparakis.chunkis.util.VanillaChunkSnapshot;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.WorldChunk;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.world.poi.PointOfInterestStorage;
+import net.minecraft.world.poi.PointOfInterestType;
+import net.minecraft.world.poi.PointOfInterestTypes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.function.Predicate;
 
 /**
  * Mixin for {@link WorldChunk} that implements player modification tracking
@@ -42,7 +50,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * to the base {@link net.minecraft.world.chunk.Chunk} class for delta storage.
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 @Mixin(WorldChunk.class)
 public class WorldChunkMixin {
@@ -52,6 +60,14 @@ public class WorldChunkMixin {
 
     @Unique
     private volatile boolean chunkis$isRestoring = false;
+
+
+    /**
+     * Cached predicate for nether portal POI lookups.
+     */
+    @Unique
+    private static final Predicate<RegistryEntry<PointOfInterestType>> PORTAL_POI_PREDICATE = type -> type.matchesKey(PointOfInterestTypes.NETHER_PORTAL);
+
 
     // -----------------------------------------------------------------------
     // Mixin injection points
@@ -73,11 +89,7 @@ public class WorldChunkMixin {
      * @param cir   callback containing the previous block state
      */
     @Inject(method = "setBlockState", at = @At("HEAD"))
-    private void chunkis$onSetBlockState(
-            final BlockPos pos,
-            final BlockState state,
-            final int flags,
-            final CallbackInfoReturnable<BlockState> cir) {
+    private void chunkis$onSetBlockState(final BlockPos pos, final BlockState state, final int flags, final CallbackInfoReturnable<BlockState> cir) {
 
         if (!shouldTrackBlockChange(getWorldChunk(), state)) {
             return;
@@ -87,8 +99,7 @@ public class WorldChunkMixin {
             final int localX = pos.getX() & CisConstants.COORD_MASK;
             final int localY = pos.getY();
             final int localZ = pos.getZ() & CisConstants.COORD_MASK;
-            @SuppressWarnings("unchecked")
-            ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
+            @SuppressWarnings("unchecked") ChunkDelta<BlockState, NbtCompound> delta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
             delta.removeBlockEntityData(localX, localY, localZ);
         }
 
@@ -106,14 +117,10 @@ public class WorldChunkMixin {
         }
         if (getWorldChunk().getWorld() instanceof ServerWorld serverWorld) {
             try {
-                io.liparakis.chunkis.util.ChunkBlockEntityCapture.captureBlockEntity(
-                        blockEntity,
-                        serverWorld.getRegistryManager(),
-                        (ChunkDelta<BlockState, NbtCompound>) getDelta());
+                io.liparakis.chunkis.util.ChunkBlockEntityCapture.captureBlockEntity(blockEntity, serverWorld.getRegistryManager(), (ChunkDelta<BlockState, NbtCompound>) getDelta());
                 GlobalChunkTracker.markDirty(getWorldChunk());
             } catch (Exception e) {
-                Chunkis.LOGGER.error("Chunkis: Failed to proactively capture added block entity at {}",
-                        blockEntity.getPos(), e);
+                Chunkis.LOGGER.error("Chunkis: Failed to proactively capture added block entity at {}", blockEntity.getPos(), e);
             }
         }
     }
@@ -152,16 +159,12 @@ public class WorldChunkMixin {
      * new changes.
      *
      * @param world        the server world
-     * @param protoChunk        the ProtoChunk being promoted
+     * @param protoChunk   the ProtoChunk being promoted
      * @param entityLoader the entity loader for the chunk
      * @param ci           callback info
      */
     @Inject(method = "<init>(Lnet/minecraft/server/world/ServerWorld;Lnet/minecraft/world/chunk/ProtoChunk;Lnet/minecraft/world/chunk/WorldChunk$EntityLoader;)V", at = @At("RETURN"))
-    private void chunkis$onConstructFromProto(
-            final ServerWorld world,
-            final ProtoChunk protoChunk,
-            final WorldChunk.EntityLoader entityLoader,
-            final CallbackInfo ci) {
+    private void chunkis$onConstructFromProto(final ServerWorld world, final ProtoChunk protoChunk, final WorldChunk.EntityLoader entityLoader, final CallbackInfo ci) {
 
         chunkis$vanillaSnapshot = new VanillaChunkSnapshot(protoChunk);
 
@@ -214,15 +217,10 @@ public class WorldChunkMixin {
             return false;
         }
         if (chunkis$vanillaSnapshot == null) {
-            Chunkis.LOGGER.debug(
-                    "Chunkis: Tracking block change without vanilla snapshot for chunk {} "
-                            + "- deduplication disabled",
-                    chunk.getPos());
+            Chunkis.LOGGER.debug("Chunkis: Tracking block change without vanilla snapshot for chunk {} " + "- deduplication disabled", chunk.getPos());
         }
         if (!isOnServerThread(chunk)) {
-            Chunkis.LOGGER.warn(
-                    "Chunkis: Block change rejected - not on server thread for chunk {} (thread: {})",
-                    chunk.getPos(), Thread.currentThread().getName());
+            Chunkis.LOGGER.warn("Chunkis: Block change rejected - not on server thread for chunk {} (thread: {})", chunk.getPos(), Thread.currentThread().getName());
             return false;
         }
         return true;
@@ -274,7 +272,7 @@ public class WorldChunkMixin {
      * @param state the new block state
      */
     @Unique
-    @SuppressWarnings({ "unchecked", "rawtypes" }) // Raw ChunkDelta: getDelta() returns wildcard;
+    @SuppressWarnings({"unchecked", "rawtypes"}) // Raw ChunkDelta: getDelta() returns wildcard;
     // addBlockChange/removeBlockChange are type-erased
     private void updateDeltaForBlockChange(final BlockPos pos, final BlockState state) {
         final int localX = pos.getX() & CisConstants.COORD_MASK;
@@ -347,11 +345,7 @@ public class WorldChunkMixin {
      */
     @Unique
     @SuppressWarnings("unchecked") // Safe: getDelta returns our own typed delta
-    private void restoreChunkFromDelta(
-            final ServerWorld world,
-            final WorldChunk chunk,
-            final ProtoChunk proto,
-            final ChunkDelta<BlockState, NbtCompound> protoDelta) {
+    private void restoreChunkFromDelta(final ServerWorld world, final WorldChunk chunk, final ProtoChunk proto, final ChunkDelta<BlockState, NbtCompound> protoDelta) {
 
         final ChunkDelta<BlockState, NbtCompound> selfDelta = (ChunkDelta<BlockState, NbtCompound>) getDelta();
         selfDelta.setSuppressInitialRepopulation(protoDelta.shouldSuppressInitialRepopulation());
@@ -359,12 +353,9 @@ public class WorldChunkMixin {
         try {
             chunkis$isRestoring = true;
 
-            final boolean wasOptimized = ChunkRestorer.restore(
-                    world,
-                    chunk,
-                    protoDelta,
-                    selfDelta,
-                    chunkis$vanillaSnapshot);
+            final boolean wasOptimized = ChunkRestorer.restore(world, chunk, protoDelta, selfDelta, chunkis$vanillaSnapshot);
+
+            resyncPortalPointOfInterestStorage(world, chunk);
 
             if (wasOptimized) {
                 selfDelta.markDirty();
@@ -413,5 +404,74 @@ public class WorldChunkMixin {
     @Unique
     private WorldChunk getWorldChunk() {
         return (WorldChunk) (Object) this;
+    }
+
+    /**
+     * Rebuilds vanilla portal POI data for restored chunks that contain nether
+     * portal blocks.
+     *
+     * <p>Chunkis restores block changes after vanilla deserialization has already
+     * initialized POIs. Nether portal lookup reads the POI index, not just block
+     * states, so restored portal blocks need a local POI rescan or vanilla may
+     * create a duplicate destination portal.</p>
+     *
+     * <p>This calls {@link PointOfInterestStorage#add} once per restored portal
+     * block rather than {@code initForPalette}. Existing POI sections route
+     * through {@code PointOfInterestSet.updatePointsOfInterest}, which only
+     * rebuilds when the set is invalid. The direct add path delegates to a set
+     * insertion that returns {@code false} for already-registered positions, so
+     * missing POIs are repaired without accumulating duplicates.</p>
+     *
+     * <p>This constructor path runs on the server thread during Chunkis'
+     * synchronous chunk restoration. Do not add external synchronization around
+     * {@link PointOfInterestStorage}; vanilla does not synchronize on that monitor,
+     * so doing so would only create false confidence rather than real safety.</p>
+     *
+     * @param world the world owning the restored chunk
+     * @param chunk the restored chunk to inspect
+     */
+    @Unique
+    private void resyncPortalPointOfInterestStorage(final ServerWorld world, final WorldChunk chunk) {
+        final int portalBlockCount = countPortalBlocks(chunk);
+        if (portalBlockCount == 0) return;
+
+
+        final PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+        final RegistryEntry<PointOfInterestType> portalPoiType = world.getRegistryManager().getOrThrow(RegistryKeys.POINT_OF_INTEREST_TYPE).getOrThrow(PointOfInterestTypes.NETHER_PORTAL);
+
+        addPortalPois(chunk, poiStorage, portalPoiType);
+
+        final long portalPoiCount = poiStorage.getInChunk(PORTAL_POI_PREDICATE, chunk.getPos(), PointOfInterestStorage.OccupationStatus.ANY).count();
+
+        if (portalPoiCount == 0) {
+            Chunkis.LOGGER.warn("Chunkis [PORTAL]: Restored chunk {} in {} has {} portal block(s) but no portal POIs after resync", chunk.getPos(), world.getRegistryKey().getValue(), portalBlockCount);
+        } else if (Chunkis.LOGGER.isDebugEnabled()) {
+            Chunkis.LOGGER.debug("Chunkis [PORTAL]: Restored chunk {} in {} with {} portal block(s) and {} portal POI(s)", chunk.getPos(), world.getRegistryKey().getValue(), portalBlockCount, portalPoiCount);
+        }
+    }
+
+    /**
+     * Counts nether portal blocks in a chunk.
+     *
+     * @param chunk the chunk to scan
+     * @return number of nether portal blocks; used to gate and diagnose POI repair
+     */
+    @Unique
+    private int countPortalBlocks(final WorldChunk chunk) {
+        final int[] count = new int[1];
+        chunk.forEachBlockMatchingPredicate(state -> state.isOf(Blocks.NETHER_PORTAL), (pos, state) -> count[0]++);
+        return count[0];
+    }
+
+    /**
+     * Registers a nether portal POI for each portal block in the chunk.
+     *
+     * @param chunk         the chunk to scan
+     * @param poiStorage    POI storage for the owning world
+     * @param portalPoiType registry entry for nether portal POIs
+     */
+    @Unique
+    private void addPortalPois(final WorldChunk chunk, final PointOfInterestStorage poiStorage, final RegistryEntry<PointOfInterestType> portalPoiType) {
+        chunk.forEachBlockMatchingPredicate(state -> state.isOf(Blocks.NETHER_PORTAL), (pos, state) -> poiStorage.add(pos, portalPoiType));
     }
 }
