@@ -9,20 +9,28 @@ import io.liparakis.chunkis.util.GlobalChunkTracker;
 import io.liparakis.chunkis.util.LeafTickContext;
 import io.liparakis.chunkis.util.VanillaChunkSnapshot;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.WorldChunk;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.world.poi.PointOfInterestStorage;
+import net.minecraft.world.poi.PointOfInterestType;
+import net.minecraft.world.poi.PointOfInterestTypes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.function.Predicate;
 
 /**
  * Mixin for {@link WorldChunk} that implements player modification tracking
@@ -42,7 +50,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * to the base {@link net.minecraft.world.chunk.Chunk} class for delta storage.
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 @Mixin(WorldChunk.class)
 public class WorldChunkMixin {
@@ -52,6 +60,14 @@ public class WorldChunkMixin {
 
     @Unique
     private volatile boolean chunkis$isRestoring = false;
+
+
+    /**
+     * Cached predicate for nether portal POI lookups.
+     */
+    @Unique
+    private static final Predicate<RegistryEntry<PointOfInterestType>> PORTAL_POI_PREDICATE = type -> type.matchesKey(PointOfInterestTypes.NETHER_PORTAL);
+
 
     // -----------------------------------------------------------------------
     // Mixin injection points
@@ -366,6 +382,8 @@ public class WorldChunkMixin {
                     selfDelta,
                     chunkis$vanillaSnapshot);
 
+            resyncPortalPointOfInterestStorage(world, chunk);
+
             if (wasOptimized) {
                 selfDelta.markDirty();
             }
@@ -413,5 +431,74 @@ public class WorldChunkMixin {
     @Unique
     private WorldChunk getWorldChunk() {
         return (WorldChunk) (Object) this;
+    }
+
+    /**
+     * Rebuilds vanilla portal POI data for restored chunks that contain nether
+     * portal blocks.
+     *
+     * <p>Chunkis restores block changes after vanilla deserialization has already
+     * initialized POIs. Nether portal lookup reads the POI index, not just block
+     * states, so restored portal blocks need a local POI rescan or vanilla may
+     * create a duplicate destination portal.</p>
+     *
+     * <p>This calls {@link PointOfInterestStorage#add} once per restored portal
+     * block rather than {@code initForPalette}. Existing POI sections route
+     * through {@code PointOfInterestSet.updatePointsOfInterest}, which only
+     * rebuilds when the set is invalid. The direct add path delegates to a set
+     * insertion that returns {@code false} for already-registered positions, so
+     * missing POIs are repaired without accumulating duplicates.</p>
+     *
+     * <p>This constructor path runs on the server thread during Chunkis'
+     * synchronous chunk restoration. Do not add external synchronization around
+     * {@link PointOfInterestStorage}; vanilla does not synchronize on that monitor,
+     * so doing so would only create false confidence rather than real safety.</p>
+     *
+     * @param world the world owning the restored chunk
+     * @param chunk the restored chunk to inspect
+     */
+    @Unique
+    private void resyncPortalPointOfInterestStorage(final ServerWorld world, final WorldChunk chunk) {
+        final int portalBlockCount = countPortalBlocks(chunk);
+        if (portalBlockCount == 0) return;
+
+
+        final PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+        final RegistryEntry<PointOfInterestType> portalPoiType = world.getRegistryManager().getOrThrow(RegistryKeys.POINT_OF_INTEREST_TYPE).getOrThrow(PointOfInterestTypes.NETHER_PORTAL);
+
+        addPortalPois(chunk, poiStorage, portalPoiType);
+
+        final long portalPoiCount = poiStorage.getInChunk(PORTAL_POI_PREDICATE, chunk.getPos(), PointOfInterestStorage.OccupationStatus.ANY).count();
+
+        if (portalPoiCount == 0) {
+            Chunkis.LOGGER.warn("Chunkis [PORTAL]: Restored chunk {} in {} has {} portal block(s) but no portal POIs after resync", chunk.getPos(), world.getRegistryKey().getValue(), portalBlockCount);
+        } else if (Chunkis.LOGGER.isDebugEnabled()) {
+            Chunkis.LOGGER.debug("Chunkis [PORTAL]: Restored chunk {} in {} with {} portal block(s) and {} portal POI(s)", chunk.getPos(), world.getRegistryKey().getValue(), portalBlockCount, portalPoiCount);
+        }
+    }
+
+    /**
+     * Counts nether portal blocks in a chunk.
+     *
+     * @param chunk the chunk to scan
+     * @return number of nether portal blocks; used to gate and diagnose POI repair
+     */
+    @Unique
+    private int countPortalBlocks(final WorldChunk chunk) {
+        final int[] count = new int[1];
+        chunk.forEachBlockMatchingPredicate(state -> state.isOf(Blocks.NETHER_PORTAL), (pos, state) -> count[0]++);
+        return count[0];
+    }
+
+    /**
+     * Registers a nether portal POI for each portal block in the chunk.
+     *
+     * @param chunk         the chunk to scan
+     * @param poiStorage    POI storage for the owning world
+     * @param portalPoiType registry entry for nether portal POIs
+     */
+    @Unique
+    private void addPortalPois(final WorldChunk chunk, final PointOfInterestStorage poiStorage, final RegistryEntry<PointOfInterestType> portalPoiType) {
+        chunk.forEachBlockMatchingPredicate(state -> state.isOf(Blocks.NETHER_PORTAL), (pos, state) -> poiStorage.add(pos, portalPoiType));
     }
 }
