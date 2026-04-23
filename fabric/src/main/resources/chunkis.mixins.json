@@ -15,7 +15,8 @@
     "storage.EntityChunkDataAccessMixin",
     "world.ServerWorldMixin",
     "entity.EntityMixin",
-    "world.ChunkRegionMixin"
+    "world.ChunkRegionMixin",
+    "world.PortalForcerMixin"
   ],
   "injectors": {
     "defaultRequire": 1
