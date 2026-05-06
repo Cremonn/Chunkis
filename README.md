@@ -77,7 +77,13 @@ For non-overworld dimensions, Chunkis stores data under `world/dimensions/<names
 - Fixes several portal and restore edge cases
 - May increase storage usage in worlds where many modified chunks now store safer restoration data
 
-Storage efficiency work is still planned, but the exact compression or baseline redesign path is not final yet.
+For `1.21.11`, versions `3.0.0+` currently have a known storage regression. Stability and correctness improved, but storage efficiency can be worse than older Chunkis releases in some worlds. Storage efficiency work is still planned, but the exact compression or baseline redesign path is not final yet.
+
+---
+
+## Contact
+
+If you want to contact me directly about Chunkis, you can reach me on Discord: `Liparakis`
 
 ---
 
@@ -105,8 +111,11 @@ Yes. Chunkis is tested on both single-player and multiplayer.
 **Why has my world not converted to CIS yet?**  
 Chunks convert when they save. Unvisited or unmodified chunks stay in Anvil format until a player loads and modifies them.
 
+**What about `1.21.11`?**  
+The `1.21.11` version line will continue once `1.21.11` stabilises.
+
 **Is Chunkis always smaller than vanilla?**  
-No. In many worlds it is still smaller, sometimes substantially smaller, but `3.0.0` prioritizes restore safety over maximum sparsity. Worlds with many modified chunks may see higher CIS storage usage than older Chunkis releases.
+No. In many worlds it is still smaller, sometimes substantially smaller, but Chunkis does not guarantee a storage win in every world.
 
 **Can I move a CIS world to a different server?**  
 Yes, as long as both servers have Chunkis installed. The `global_ids.json` file ensures portability. Without Chunkis, the world cannot be read.
@@ -117,6 +126,9 @@ Your world remains in CIS format. You will need to keep Chunkis installed, or re
 **Can I use this with a specific mod?**  
 Check Known Incompatibilities above. If the mod reads `.mca` files or modifies chunks post-generation, it is likely incompatible. When unsure, test on a backup.
 
+**Will older Minecraft versions be supported?**  
+Development focuses on the latest release. Older versions will not receive regular updates unless a critical bug is reported. If anyone wants to backport changes, they are welcome to open a pull request.
+
 ---
 
 ## Reporting Issues
@@ -126,6 +138,8 @@ Before opening an issue:
 - Confirm the issue is not caused by a mod in the Known Incompatibilities list
 - Make sure you are on the latest Chunkis version
 - State whether the problem is about correctness, performance, or storage growth
+
+If you prefer direct contact first, Discord is `Liparakis`.
 
 When opening an issue, include:
 - Minecraft version, Fabric Loader version, and full modlist
