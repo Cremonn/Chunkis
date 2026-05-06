@@ -37,10 +37,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(SpawnHelper.class)
 public class SpawnHelperMixin {
 
-    // -----------------------------------------------------------------------
-    // Mixin entry point
-    // -----------------------------------------------------------------------
-
     /**
      * Intercepts entity population to prevent duplicate spawning on restored chunks.
      * <p>
@@ -73,10 +69,6 @@ public class SpawnHelperMixin {
             logSpawnCancellation(chunkPos);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Guard helpers
-    // -----------------------------------------------------------------------
 
     /**
      * Retrieves the chunk at the specified position.
@@ -112,10 +104,6 @@ public class SpawnHelperMixin {
         ci.cancel();
         return true;
     }
-
-    // -----------------------------------------------------------------------
-    // Logging helpers
-    // -----------------------------------------------------------------------
 
     /**
      * Logs entity population cancellation at debug level.

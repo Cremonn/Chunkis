@@ -26,6 +26,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  *
  * <p><b>Threading:</b> Invoked on the server main thread during chunk generation.
  * All field accesses in this mixin must remain main-thread-only.
+ *
+ * @author Liparakis
+ * @version 1.2
+ *
  */
 @Mixin(ChunkRegion.class)
 public class ChunkRegionMixin {

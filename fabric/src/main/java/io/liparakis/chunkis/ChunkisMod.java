@@ -1,42 +1,62 @@
 package io.liparakis.chunkis;
 
-import io.liparakis.chunkis.command.MigrationCommand;
-import io.liparakis.chunkis.util.CisWorldMigrator;
+import io.liparakis.chunkis.command.DurabilityTestCommand;
+import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.core.CisChunkPos;
+import io.liparakis.chunkis.migration.CisWorldMigrator;
+import io.liparakis.chunkis.migration.McaMigrator;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
-import io.liparakis.chunkis.util.GlobalChunkTracker;
-import io.liparakis.chunkis.util.McaMigrator;
+import io.liparakis.chunkis.portal.PortalChunkIndexManager;
+import io.liparakis.chunkis.portal.PortalLinkManager;
+import io.liparakis.chunkis.storage.AsyncCisSaveManager;
+import io.liparakis.chunkis.storage.BaseChunkCaptureScheduler;
+import io.liparakis.chunkis.storage.DeltaPersistenceGuard;
+import io.liparakis.chunkis.storage.FabricCisStorageHelper;
+import io.liparakis.chunkis.storage.io.CisStorage;
+import io.liparakis.chunkis.world.GlobalChunkTracker;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.state.property.Property;
+import net.minecraft.util.math.ChunkPos;
+
+import java.util.Map;
 
 /**
- * Common initialization for the Chunkis mod.
- * <p>
- * This class serves as the main entry point for the mod across both physical
- * client
- * and dedicated server environments (Fabric "main" entrypoint).
- * </p>
+ * Main Fabric entrypoint for Chunkis.
  *
- * <h2>Responsibilities:</h2>
+ * <p>This class performs common initialization for both integrated and dedicated
+ * servers. Client-only setup belongs in {@link ClientChunkisMod}.</p>
+ *
+ * <p>Responsibilities:</p>
  * <ul>
- * <li><b>Common Registration:</b> Registers shared content like packets,
- * blocks, items, etc.</li>
- * <li><b>Server-Side Logic:</b> Handles logic that runs on both singleplayer
- * and multiplayer servers.</li>
+ *   <li>register network payloads</li>
+ *   <li>register server commands</li>
+ *   <li>register world/server lifecycle hooks</li>
+ *   <li>flush pending Chunkis state during shutdown</li>
+ *   <li>clear static runtime state after shutdown</li>
  * </ul>
  *
- * <p>
- * For client-specific initialization (rendering, client packet handling),
- * see {@link ClientChunkisMod}.
- * </p>
+ * <p>The entrypoint intentionally stays thin. Migration, storage, dirty-delta
+ * tracking, async saves, base chunk capture, and portal indexing are handled by
+ * their dedicated classes.</p>
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.2
  */
-public class ChunkisMod implements ModInitializer {
+public final class ChunkisMod implements ModInitializer {
 
+    /**
+     * Fabric common initialization hook.
+     */
     @Override
     public void onInitialize() {
         registerPayloads();
@@ -44,24 +64,182 @@ public class ChunkisMod implements ModInitializer {
         registerEvents();
     }
 
-    private void registerEvents() {
-        ServerWorldEvents.LOAD
-                .register((server, world) -> {
-                    McaMigrator.migrateWorld(world);
-                    CisWorldMigrator.migrateWorld(world);
-                });
-        ServerLifecycleEvents.SERVER_STOPPED.register(server -> GlobalChunkTracker.clear());
-    }
-
-    private void registerPayloads() {
+    /**
+     * Registers Chunkis network payloads.
+     */
+    private static void registerPayloads() {
         PayloadTypeRegistry.playS2C().register(
                 ChunkDeltaPayload.ID,
-                ChunkDeltaPayload.CODEC);
+                ChunkDeltaPayload.CODEC
+        );
     }
 
-    private void registerCommands() {
+    /**
+     * Registers Chunkis server commands.
+     */
+    private static void registerCommands() {
         CommandRegistrationCallback.EVENT.register(
-                (dispatcher, registryAccess, environment)
-                        -> MigrationCommand.register(dispatcher));
+                (dispatcher, registryAccess, environment) ->
+                        DurabilityTestCommand.register(dispatcher)
+        );
+    }
+
+    /**
+     * Registers server and world lifecycle hooks.
+     *
+     * <p>World load runs migration. World tick advances deferred base chunk
+     * capture. Server stopping flushes Chunkis runtime state while worlds and
+     * storage are still available. Server stopped clears static managers.</p>
+     */
+    private static void registerEvents() {
+        ServerWorldEvents.LOAD.register(
+                (server, world) -> migrateWorld(world)
+        );
+
+        ServerTickEvents.END_WORLD_TICK.register(
+                BaseChunkCaptureScheduler::tick
+        );
+
+        ServerLifecycleEvents.SERVER_STOPPING.register(
+                ChunkisMod::flushBeforeServerStop
+        );
+
+        ServerLifecycleEvents.SERVER_STOPPED.register(
+                server -> clearRuntimeState()
+        );
+    }
+
+    /**
+     * Runs world migration passes.
+     *
+     * <p>MCA migration runs before CIS world migration, matching the existing
+     * migration flow.</p>
+     *
+     * @param world loaded server world
+     */
+    private static void migrateWorld(final ServerWorld world) {
+        McaMigrator.migrateWorld(world);
+        CisWorldMigrator.migrateWorld(world);
+    }
+
+    /**
+     * Flushes Chunkis runtime state before the server fully stops.
+     *
+     * <p>The per-world order is preserved exactly:</p>
+     * <ol>
+     *   <li>flush and close base chunk capture</li>
+     *   <li>force-save currently pending tracked deltas</li>
+     *   <li>flush and close async CIS saves</li>
+     *   <li>close portal chunk index state</li>
+     * </ol>
+     *
+     * @param server stopping Minecraft server
+     */
+    private static void flushBeforeServerStop(final MinecraftServer server) {
+        for (final ServerWorld world : server.getWorlds()) {
+            flushWorldBeforeStop(world);
+        }
+
+        PortalLinkManager.close(server);
+    }
+
+    /**
+     * Flushes Chunkis-managed state for one world.
+     *
+     * @param world world being stopped
+     */
+    private static void flushWorldBeforeStop(final ServerWorld world) {
+        BaseChunkCaptureScheduler.flushAndClose(world);
+        flushPendingDeltas(world);
+        AsyncCisSaveManager.flushAndClose(world);
+        PortalChunkIndexManager.close(world);
+    }
+
+    /**
+     * Force-saves pending dirty deltas for one world.
+     *
+     * <p>This is a final synchronous safety sweep. Normal chunk saves should
+     * already flush most deltas, but shutdown can leave dirty entries in the
+     * global tracker.</p>
+     *
+     * <p>The pending map is a snapshot, so it is safe to iterate while successful
+     * saves remove entries from the tracker.</p>
+     *
+     * @param world world whose pending deltas should be flushed
+     */
+    private static void flushPendingDeltas(final ServerWorld world) {
+        final Map<ChunkPos, ChunkDelta<BlockState, NbtCompound>> pending =
+                GlobalChunkTracker.getPendingDeltas(world);
+
+        if (pending.isEmpty()) {
+            return;
+        }
+
+        Chunkis.LOGGER.warn(
+                "Chunkis [STOPPING]: Force-saving {} dirty delta(s) for {}",
+                pending.size(),
+                world.getRegistryKey().getValue()
+        );
+
+        final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage =
+                FabricCisStorageHelper.getStorage(world);
+
+        for (final Map.Entry<ChunkPos, ChunkDelta<BlockState, NbtCompound>> entry
+                : pending.entrySet()) {
+            savePendingDelta(world, storage, entry.getKey(), entry.getValue());
+        }
+    }
+
+    /**
+     * Saves one pending dirty delta.
+     *
+     * <p>The {@link CisChunkPos} wrapper is allocated only after the dirty check,
+     * avoiding unnecessary objects for stale clean entries in the pending snapshot.</p>
+     *
+     * @param world   owning world
+     * @param storage world CIS storage
+     * @param pos     chunk position
+     * @param delta   delta to save, may be {@code null}
+     */
+    @SuppressWarnings("All")
+    private static void savePendingDelta(
+            final ServerWorld world,
+            final CisStorage<Block, BlockState, Property<?>, NbtCompound> storage,
+            final ChunkPos pos,
+            final ChunkDelta<BlockState, NbtCompound> delta
+    ) {
+        if (delta == null || !delta.isDirty()) {
+            return;
+        }
+
+        if (DeltaPersistenceGuard.shouldRejectSparseDeltaWithoutBase(delta)) {
+            DeltaPersistenceGuard.logRejectedSparseDeltaWithoutBase(
+                    world,
+                    pos,
+                    delta,
+                    "server-stopping",
+                    "ChunkisMod#savePendingDelta"
+            );
+            return;
+        }
+
+        if (storage.save(new CisChunkPos(pos.x, pos.z), delta)) {
+            GlobalChunkTracker.markSaved(world, pos);
+        }
+    }
+
+    /**
+     * Clears static Chunkis runtime state after the server has stopped.
+     *
+     * <p>Persistence work should already be complete by this point. This releases
+     * in-memory references so singleplayer disconnects and server restarts do not
+     * leak stale state into the next lifecycle.</p>
+     */
+    private static void clearRuntimeState() {
+        GlobalChunkTracker.clear();
+        AsyncCisSaveManager.clear();
+        BaseChunkCaptureScheduler.clear();
+        PortalChunkIndexManager.clear();
+        PortalLinkManager.clear();
     }
 }

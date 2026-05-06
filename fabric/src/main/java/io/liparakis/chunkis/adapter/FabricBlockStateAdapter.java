@@ -1,6 +1,7 @@
 package io.liparakis.chunkis.adapter;
 
 import io.liparakis.chunkis.spi.BlockStateAdapter;
+import io.liparakis.chunkis.spi.PropertyValueAdapter;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.state.property.Property;
@@ -25,15 +26,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * @author Liparakis
  * @version 1.1
  */
-public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, BlockState, Property<?>> {
+public final class FabricBlockStateAdapter
+        implements BlockStateAdapter<Block, BlockState, Property<?>>, PropertyValueAdapter<BlockState, Property<?>> {
 
     // Shared immutable sentinels to avoid allocation for blocks with no properties.
     private static final List<Property<?>> EMPTY_PROPERTIES = Collections.emptyList();
     private static final List<Object>      EMPTY_VALUES      = Collections.emptyList();
-
-    // Stable comparator instance: string-based for deterministic, cross-type ordering
-    // across enums, integers, and booleans.
-    private static final Comparator<Object> VALUE_COMPARATOR = Comparator.comparing(Object::toString);
 
     // Caches for immutable block metadata — safe to retain indefinitely since
     // block properties and their values are fixed at registration time.
@@ -104,10 +102,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
                 || returnType.equals(String.class)
                 || returnType.equals(Optional.class);
     }
-
-    // -------------------------------------------------------------------------
-    // BlockStateAdapter API
-    // -------------------------------------------------------------------------
 
     /**
      * Extracts the block from a block state.
@@ -188,6 +182,13 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         return getOrCreateIndexMap(property).getOrDefault(currentValue, -1);
     }
 
+    @Override
+    public Object getPropertyValue(final BlockState state, final Property<?> property) {
+        Objects.requireNonNull(state, "BlockState cannot be null");
+        Objects.requireNonNull(property, "Property cannot be null");
+        return state.get(property);
+    }
+
     /**
      * Creates a new block state with the specified property value.
      *
@@ -227,37 +228,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         Objects.requireNonNull(block, "Block cannot be null");
         return block.getDefaultState();
     }
-
-    /**
-     * Checks if a block state represents air.
-     *
-     * @param state the block state
-     * @return true if the state is air
-     * @throws NullPointerException if state is null
-     */
-    @Override
-    public boolean isAir(final BlockState state) {
-        Objects.requireNonNull(state, "BlockState cannot be null");
-        return state.isAir();
-    }
-
-    /**
-     * Returns a comparator for property values.
-     *
-     * <p>
-     * Uses string representation for deterministic, stable sorting across
-     * different property value types (enums, integers, booleans).
-     *
-     * @return comparator based on string representation
-     */
-    @Override
-    public Comparator<Object> getValueComparator() {
-        return VALUE_COMPARATOR;
-    }
-
-    // -------------------------------------------------------------------------
-    // Resolution helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Resolves the property list for the given block, returning the shared
@@ -321,10 +291,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         return property.getValues();
     }
 
-    // -------------------------------------------------------------------------
-    // Index map
-    // -------------------------------------------------------------------------
-
     /**
      * Gets or creates an O(1) value-to-index mapping for the given property.
      *
@@ -358,10 +324,6 @@ public final class FabricBlockStateAdapter implements BlockStateAdapter<Block, B
         }
         return Collections.unmodifiableMap(indexMap);
     }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates and state mutation
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the given index falls outside the bounds of the values list.

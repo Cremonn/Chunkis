@@ -1,5 +1,13 @@
 rootProject.name = "Chunkis"
 
-includeBuild("core")
-includeBuild("cismigrator")
+includeBuild("core") {
+    dependencySubstitution {
+        substitute module("io.liparakis.chunkis:chunkis-core") using project(":")
+    }
+}
+includeBuild("cismigrator") {
+    dependencySubstitution {
+        substitute module("io.liparakis.chunkis:chunkis-cismigrator") using project(":")
+    }
+}
 includeBuild("fabric")

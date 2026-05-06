@@ -6,197 +6,227 @@ import net.minecraft.block.Blocks;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Fabric implementation of BlockRegistryAdapter with performance optimizations.
- * This adapter provides bidirectional mapping between blocks and their string
- * identifiers with caching to reduce memory allocation and improve lookup performance.
+ * Fabric implementation of {@link BlockRegistryAdapter}.
  *
- * <p>
- * Thread-safe for concurrent access.
+ * <p>This adapter maps Minecraft blocks to registry ID strings and registry ID
+ * strings back to blocks. Small concurrent caches are used to avoid repeated
+ * registry lookups and string allocation during CIS encode/decode paths.</p>
+ *
+ * <p>Fast paths are provided for {@link Blocks#AIR}, since air is usually the
+ * most common block state in chunk storage.</p>
+ *
+ * <p><b>Thread safety:</b> cache access uses {@link ConcurrentHashMap}. The
+ * adapter stores only registry constants and ID strings, not world or chunk
+ * references.</p>
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  */
 public final class FabricBlockRegistryAdapter implements BlockRegistryAdapter<Block> {
 
-    // Bidirectional caches for fast lookups.
-    // ConcurrentHashMap provides thread-safety without synchronized overhead.
-    private final Map<Block, String>      blockToIdCache          = new ConcurrentHashMap<>(256);
-    private final Map<String, Identifier> stringToIdentifierCache = new ConcurrentHashMap<>(256);
-    private final Map<String, Block>      idToBlockCache          = new ConcurrentHashMap<>(256);
-
-    // Pre-interned constants for the most common case.
-    private static final Block  AIR_BLOCK = Blocks.AIR;
-    private static final String AIR_ID    = "minecraft:air";
-
     /**
-     * Maximum cache size to prevent unbounded memory growth.
-     * Minecraft typically has fewer than 1000 blocks, so 1024 provides headroom
-     * for modded environments without allowing unbounded growth.
+     * Maximum entries retained per lookup cache.
+     *
+     * <p>Minecraft's block registry is finite, but modded environments can still
+     * produce many IDs. This cap prevents accidental unbounded growth from malformed
+     * or unexpected serialized input.</p>
      */
     private static final int MAX_CACHE_SIZE = 1024;
 
-    // -------------------------------------------------------------------------
-    // BlockRegistryAdapter API
-    // -------------------------------------------------------------------------
+    /**
+     * Common AIR block fast-path.
+     */
+    private static final Block AIR_BLOCK = Blocks.AIR;
 
     /**
-     * Retrieves the string identifier for a given block with caching.
+     * Common AIR ID fast-path.
+     */
+    private static final String AIR_ID = "minecraft:air";
+
+    /**
+     * Parsed AIR identifier used as a fallback for malformed IDs.
+     */
+    private static final Identifier AIR_IDENTIFIER = Identifier.of("minecraft", "air");
+
+    /**
+     * Block instance to registry ID cache.
+     */
+    private final Map<Block, String> blockToIdCache = new ConcurrentHashMap<>(256);
+
+    /**
+     * Registry ID string to block instance cache.
      *
-     * @param block the block to identify
-     * @return the string identifier (e.g., "minecraft:stone")
-     * @throws NullPointerException if block is null
+     * <p>This also makes a separate string-to-identifier cache unnecessary:
+     * parsing only happens on block-cache misses.</p>
+     */
+    private final Map<String, Block> idToBlockCache = new ConcurrentHashMap<>(256);
+
+    /**
+     * Returns the registry ID string for a block.
+     *
+     * @param block block to identify
+     * @return registry ID, for example {@code minecraft:stone}
      */
     @Override
     public String getId(final Block block) {
-        Objects.requireNonNull(block, "Block cannot be null");
-        if (isAirBlock(block)) return AIR_ID;
-        return blockToIdCache.computeIfAbsent(block, this::resolveBlockId);
+        Objects.requireNonNull(block, "block");
+
+        if (block == AIR_BLOCK) {
+            return AIR_ID;
+        }
+
+        final String cached = blockToIdCache.get(block);
+
+        if (cached != null) {
+            return cached;
+        }
+
+        final String resolved = resolveBlockId(block);
+        cacheBlockId(block, resolved);
+
+        return resolved;
     }
 
     /**
-     * Retrieves a block from its string identifier with caching and validation.
+     * Returns the block for a registry ID string.
      *
-     * @param id the string identifier (e.g., "minecraft:stone")
-     * @return the corresponding block, or AIR if the identifier is invalid
+     * <p>Malformed, null, empty, or unknown IDs safely resolve to air.</p>
+     *
+     * @param id registry ID string, for example {@code minecraft:stone}
+     * @return resolved block, or air when invalid
      */
     @Override
     public Block getBlock(final String id) {
-        if (isInvalidId(id)) return AIR_BLOCK;
-        if (isAirId(id))     return AIR_BLOCK;
-        return idToBlockCache.computeIfAbsent(id, this::parseAndRetrieveBlock);
+        if (isInvalidId(id) || AIR_ID.equals(id)) {
+            return AIR_BLOCK;
+        }
+
+        final Block cached = idToBlockCache.get(id);
+
+        if (cached != null) {
+            return cached;
+        }
+
+        final Block resolved = resolveBlock(id);
+        cacheBlock(id, resolved);
+
+        return resolved;
     }
 
     /**
-     * Returns the AIR block constant.
+     * Returns the canonical air block.
      *
-     * @return the AIR block
+     * @return air block
      */
     @Override
     public Block getAir() {
         return AIR_BLOCK;
     }
 
-    // -------------------------------------------------------------------------
-    // Resolution helpers
-    // -------------------------------------------------------------------------
+    /**
+     * Returns all currently registered blocks.
+     *
+     * <p>This intentionally does not cache the result. Some mod/plugin setups may
+     * construct adapters during registration phases, and caching too early could
+     * expose a stale block list.</p>
+     *
+     * @return collection snapshot of registered blocks
+     */
+    @Override
+    public Collection<Block> getRegisteredBlocks() {
+        return Registries.BLOCK.stream().toList();
+    }
 
     /**
-     * Resolves and interns the registry identifier string for a given block.
-     * Called only on cache miss; result is stored by the caller.
+     * Resolves a block's registry ID string.
      *
-     * @param block the block to resolve
-     * @return interned registry identifier string
+     * <p>The string is interned because registry IDs are repeated heavily in CIS
+     * metadata and mappings. Interning is safe here because the registry block set
+     * is bounded compared to arbitrary user strings.</p>
+     *
+     * @param block block to resolve
+     * @return interned registry ID string
      */
-    private String resolveBlockId(final Block block) {
-        evictIfNeeded(blockToIdCache);
-        // Intern string to reduce memory footprint for duplicate IDs
+    private static String resolveBlockId(final Block block) {
         return Registries.BLOCK.getId(block).toString().intern();
     }
 
     /**
-     * Parses the given identifier string and retrieves the corresponding block
-     * from the registry. Called only on cache miss.
+     * Resolves a registry ID string to a block.
      *
-     * @param id the string identifier to look up
-     * @return the resolved Block
+     * @param id registry ID string
+     * @return resolved block, or air if invalid/unknown
      */
-    private Block parseAndRetrieveBlock(final String id) {
-        evictIfNeeded(idToBlockCache);
-        return Registries.BLOCK.get(resolveIdentifier(id));
+    private static Block resolveBlock(final String id) {
+        final Identifier identifier = parseIdentifierOrAir(id);
+        return Registries.BLOCK.get(identifier);
     }
 
     /**
-     * Retrieves or creates a cached {@link Identifier} for the given string.
+     * Parses an identifier, falling back to air when malformed.
      *
-     * @param id the raw identifier string
-     * @return the parsed or cached Identifier
+     * @param id raw ID string
+     * @return parsed identifier, or air identifier
      */
-    private Identifier resolveIdentifier(final String id) {
-        return stringToIdentifierCache.computeIfAbsent(id, this::parseIdentifier);
-    }
-
-    /**
-     * Attempts to parse the given string into an {@link Identifier},
-     * falling back to the AIR identifier if parsing fails.
-     *
-     * @param id the raw identifier string to parse
-     * @return a valid Identifier, never null
-     */
-    private Identifier parseIdentifier(final String id) {
-        evictIfNeeded(stringToIdentifierCache);
+    private static Identifier parseIdentifierOrAir(final String id) {
         final Identifier parsed = Identifier.tryParse(id);
-        // Fallback to AIR if parsing fails, preventing crashes on malformed input
-        return parsed != null ? parsed : fallbackIdentifier();
+        return parsed != null ? parsed : AIR_IDENTIFIER;
     }
 
     /**
-     * Returns the AIR identifier used as a safe fallback when parsing fails.
+     * Stores a block-to-ID mapping.
      *
-     * @return the minecraft:air Identifier
-     */
-    private static Identifier fallbackIdentifier() {
-        return Identifier.of("minecraft", "air");
-    }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
-
-    /**
-     * Returns true if the given block is the AIR singleton.
-     * Uses identity comparison since AIR_BLOCK is a registry constant.
-     */
-    private static boolean isAirBlock(final Block block) {
-        return block == AIR_BLOCK;
-    }
-
-    /**
-     * Returns true if the given id is null or empty.
-     * Defensive guard to avoid NullPointerException or empty registry lookups.
-     */
-    private static boolean isInvalidId(final String id) {
-        return id == null || id.isEmpty();
-    }
-
-    /**
-     * Returns true if the given id is the well-known AIR identifier string.
-     * Allows fast-path return without a cache or registry lookup.
-     */
-    private static boolean isAirId(final String id) {
-        return AIR_ID.equals(id);
-    }
-
-    // -------------------------------------------------------------------------
-    // Cache management
-    // -------------------------------------------------------------------------
-
-    /**
-     * Evicts (clears) the given cache if it has exceeded {@link #MAX_CACHE_SIZE}.
+     * <p>This avoids {@code computeIfAbsent} because the cache may be cleared when
+     * over capacity. Mutating the same map from inside a compute mapping function
+     * is not worth the footgun.</p>
      *
-     * <p>
-     * This uses a naive clear-all strategy. For production, consider
-     * replacing with Caffeine or Guava's LoadingCache for LRU eviction.
+     * @param block block key
+     * @param id    resolved ID
+     */
+    private void cacheBlockId(final Block block, final String id) {
+        evictIfNeeded(blockToIdCache);
+        blockToIdCache.putIfAbsent(block, id);
+    }
+
+    /**
+     * Stores an ID-to-block mapping.
      *
-     * @param cache the map to check and potentially clear
+     * @param id    registry ID string
+     * @param block resolved block
+     */
+    private void cacheBlock(final String id, final Block block) {
+        evictIfNeeded(idToBlockCache);
+        idToBlockCache.putIfAbsent(id, block);
+    }
+
+    /**
+     * Clears a cache if it has grown beyond the configured cap.
+     *
+     * <p>The eviction strategy is intentionally simple. The registry key space is
+     * small and stable during normal play, so full clear is cheaper than bringing
+     * in an LRU dependency for this adapter.</p>
+     *
+     * @param cache cache to check
      */
     private static void evictIfNeeded(final Map<?, ?> cache) {
-        if (isCacheOverCapacity(cache)) {
+        if (cache.size() > MAX_CACHE_SIZE) {
             cache.clear();
         }
     }
 
     /**
-     * Returns true if the cache has exceeded the maximum allowed size.
+     * Returns whether an ID string is unusable.
      *
-     * @param cache the map to check
-     * @return true if cache.size() exceeds MAX_CACHE_SIZE
+     * @param id ID string
+     * @return {@code true} when null or empty
      */
-    private static boolean isCacheOverCapacity(final Map<?, ?> cache) {
-        return cache.size() > MAX_CACHE_SIZE;
+    private static boolean isInvalidId(final String id) {
+        return id == null || id.isEmpty();
     }
 }

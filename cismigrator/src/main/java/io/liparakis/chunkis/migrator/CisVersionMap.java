@@ -1,6 +1,6 @@
 package io.liparakis.chunkis.migrator;
 
-import io.liparakis.chunkis.storage.CisConstants;
+import io.liparakis.chunkis.storage.model.CisConstants;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +16,10 @@ import java.util.List;
  * of CIS format versions this is cheaper than a map in practice.
  *
  * <p><b>Threading:</b> All methods are stateless and safe to call from any thread.
+ *
+ * @author Liparakis
+ * @version 1.0
+ *
  */
 public final class CisVersionMap {
 
@@ -27,7 +31,10 @@ public final class CisVersionMap {
      */
     private static final List<CisVersionEdge> EDGES = List.of(
             new CisVersionEdge(7, 8, "Expanded dense-section palette width from 8 bits to 12 bits."),
-            new CisVersionEdge(8, 9, "Added chunk-level metadata storage for structure starts and references."));
+            new CisVersionEdge(8, 9, "Added chunk-level metadata storage for structure starts and references."),
+            new CisVersionEdge(9, 10, "Replaced per-payload compressed NBT blobs with raw length-prefixed NBT inside " +
+                    "the outer CIS compression stream.")
+    );
 
     private CisVersionMap() {
         throw new AssertionError("Utility class");

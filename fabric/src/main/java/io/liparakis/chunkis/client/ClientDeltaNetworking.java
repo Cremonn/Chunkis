@@ -4,8 +4,8 @@ import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.network.ChunkDeltaPayload;
-import io.liparakis.chunkis.storage.codec.CisNetworkDecoder;
-import io.liparakis.chunkis.util.FabricNetworkCodecFactory;
+import io.liparakis.chunkis.storage.codec.network.CisNetworkDecoder;
+import io.liparakis.chunkis.network.FabricNetworkCodecFactory;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
@@ -60,10 +60,6 @@ public final class ClientDeltaNetworking {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Registration
-    // -------------------------------------------------------------------------
-
     /**
      * Registers the global {@link ChunkDeltaPayload} receiver and the disconnect
      * cleanup hook. Must be called on the main thread during client initialisation.
@@ -78,10 +74,6 @@ public final class ClientDeltaNetworking {
         ClientPlayConnectionEvents.DISCONNECT.register(
                 (handler, client) -> cleanupThreadLocals());
     }
-
-    // -------------------------------------------------------------------------
-    // Networking-thread handler (keep minimal — validate + schedule only)
-    // -------------------------------------------------------------------------
 
     /**
      * Validates the incoming payload on the networking thread and, if valid,
@@ -109,10 +101,6 @@ public final class ClientDeltaNetworking {
         final var client = context.client();
         client.execute(() -> processChunkDelta(payload, client.world));
     }
-
-    // -------------------------------------------------------------------------
-    // Main-thread processing
-    // -------------------------------------------------------------------------
 
     /**
      * Decodes the payload and applies its delta to the client world.
@@ -162,8 +150,7 @@ public final class ClientDeltaNetworking {
 
         final ChunkDelta<BlockState, NbtCompound> receivedDelta = DECODER.get().decode(payload.data());
 
-        @SuppressWarnings("unchecked")
-        final ChunkDelta<BlockState, NbtCompound> clientDelta =
+        @SuppressWarnings("unchecked") final ChunkDelta<BlockState, NbtCompound> clientDelta =
                 (ChunkDelta<BlockState, NbtCompound>) ((ChunkisDeltaDuck) chunk).chunkis$getDelta();
 
         applyDelta(clientDelta, receivedDelta, world, chunkX, chunkZ);
@@ -190,10 +177,6 @@ public final class ClientDeltaNetworking {
         visitor.reset(clientDelta, world, chunkX, chunkZ);
         receivedDelta.accept(visitor);
     }
-
-    // -------------------------------------------------------------------------
-    // Metrics helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Returns the current nanosecond timestamp if metrics are enabled, otherwise 0.
@@ -227,10 +210,6 @@ public final class ClientDeltaNetworking {
             ClientDeltaMetrics.logSummary();
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the given data byte array is null or empty.
@@ -283,10 +262,6 @@ public final class ClientDeltaNetworking {
                         "(Warning shown once only.)",
                 chunkX, chunkZ, chunk.getClass().getName());
     }
-
-    // -------------------------------------------------------------------------
-    // Thread-local lifecycle
-    // -------------------------------------------------------------------------
 
     /**
      * Releases thread-local decoder and visitor resources.

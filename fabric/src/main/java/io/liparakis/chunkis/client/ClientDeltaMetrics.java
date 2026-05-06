@@ -49,10 +49,6 @@ public final class ClientDeltaMetrics {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Recording
-    // -------------------------------------------------------------------------
-
     /**
      * Records receipt of one packet of the given byte length.
      *
@@ -90,10 +86,6 @@ public final class ClientDeltaMetrics {
     public static long packetCount() {
         return packetsReceived.sum();
     }
-
-    // -------------------------------------------------------------------------
-    // Logging
-    // -------------------------------------------------------------------------
 
     /**
      * Logs an error with rate limiting. Only logs the 1st and every
@@ -145,10 +137,6 @@ public final class ClientDeltaMetrics {
                 packets, avgBytes, avgBlocks, avgMicros));
     }
 
-    // -------------------------------------------------------------------------
-    // Snapshot
-    // -------------------------------------------------------------------------
-
     /**
      * Returns an immutable snapshot of the current metric values.
      * Useful for testing and external reporting without exposing the live counters.
@@ -164,10 +152,6 @@ public final class ClientDeltaMetrics {
                 totalBlocksChanged.sum(),
                 errorCount.get());
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the given error count should trigger a log entry.
@@ -192,10 +176,6 @@ public final class ClientDeltaMetrics {
     private static double averagePerPacket(final long total, final long packets) {
         return packets > 0 ? (double) total / packets : 0.0;
     }
-
-    // -------------------------------------------------------------------------
-    // Snapshot record
-    // -------------------------------------------------------------------------
 
     /**
      * Immutable snapshot of all metric counters at a single point in time.

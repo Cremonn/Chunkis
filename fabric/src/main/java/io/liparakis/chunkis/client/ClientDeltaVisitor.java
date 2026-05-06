@@ -58,10 +58,6 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
      */
     private int baseZ;
 
-    // -------------------------------------------------------------------------
-    // Lifecycle
-    // -------------------------------------------------------------------------
-
     /**
      * Prepares this visitor for a new delta application.
      * Must be called before passing this visitor to {@link ChunkDelta#accept}.
@@ -81,10 +77,6 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
         this.baseX = chunkX << 4;
         this.baseZ = chunkZ << 4;
     }
-
-    // -------------------------------------------------------------------------
-    // DeltaVisitor implementation
-    // -------------------------------------------------------------------------
 
     /**
      * Applies a single block-state change to the client world.
@@ -153,10 +145,6 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
         });
     }
 
-    // -------------------------------------------------------------------------
-    // Block entity helpers
-    // -------------------------------------------------------------------------
-
     /**
      * Returns true if the block at the given position currently supports a block entity.
      *
@@ -197,10 +185,6 @@ final class ClientDeltaVisitor implements ChunkDelta.DeltaVisitor<BlockState, Nb
         world.removeBlockEntity(pos);
         world.addBlockEntity(be);
     }
-
-    // -------------------------------------------------------------------------
-    // Entity helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if no entity with the given ID is currently tracked by the world.

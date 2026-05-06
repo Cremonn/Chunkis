@@ -6,8 +6,8 @@ import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.Palette;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.BitUtils.BitReader;
-import io.liparakis.chunkis.storage.CisConstants;
+import io.liparakis.chunkis.storage.bits.BitReader;
+import io.liparakis.chunkis.storage.model.CisConstants;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -22,41 +22,67 @@ import java.util.List;
  *
  * @param <S> The BlockState type
  * @param <N> The NBT type
+ *
+ * @version 1
+ * @author Liparakis
  */
 public abstract class AbstractCisDecoder<S, N> {
 
-    /** Size of the CIS file header in bytes (magic number + version). */
+    /**
+     * Size of the CIS file header in bytes (magic number + version).
+     */
     protected static final int HEADER_SIZE = 8;
 
-    /** Number of bits in a nibble (half-byte). */
+    /**
+     * Number of bits in a nibble (half-byte).
+     */
     protected static final int BITS_PER_NIBBLE = 4;
 
-    /** Total number of blocks in a chunk section (16x16x16). */
+    /**
+     * Total number of blocks in a chunk section (16x16x16).
+     */
     protected static final int SECTION_VOLUME = 4096;
 
-    /** Width/height/depth of a chunk section in blocks. */
+    /**
+     * Width/height/depth of a chunk section in blocks.
+     */
     protected static final int SECTION_SIZE = 16;
 
-    /** Maximum reasonable palette size to prevent memory exhaustion attacks. */
+    /**
+     * Maximum reasonable palette size to prevent memory exhaustion attacks.
+     */
     protected static final int MAX_REASONABLE_PALETTE_SIZE = 10000;
 
-    /** Bit reader for block property data. */
+    /**
+     * Bit reader for block property data.
+     */
     protected final BitReader propertyReader;
 
-    /** Bit reader for section data. */
+    /**
+     * Bit reader for section data.
+     */
     protected final BitReader sectionReader;
 
-    /** Reusable buffer for local palette indices in dense sections. */
+    /**
+     * Reusable buffer for local palette indices in dense sections.
+     */
     protected final int[] localPaletteBuffer;
 
-    /** The format version of the data being decoded. */
+    /**
+     * The format version of the data being decoded.
+     */
     protected int decodedVersion;
 
-    /** The global palette mapping indices to BlockStates. */
+    /**
+     * The global palette mapping indices to BlockStates.
+     */
     protected List<S> globalPalette;
 
+    /** Adapter used to rebuild concrete block states from decoded palette and property data. */
     protected final BlockStateAdapter<?, S, ?> stateAdapter;
+    /** Adapter used to decode block entities, entities, and chunk metadata payloads. */
     protected final NbtAdapter<N> nbtAdapter;
+    /** Fallback state returned when the payload refers to an invalid palette entry. */
     protected final S airState;
 
     /**
@@ -97,6 +123,9 @@ public abstract class AbstractCisDecoder<S, N> {
         return delta;
     }
 
+    /**
+     * Validates the fixed-width CIS header and returns the offset of the first payload section.
+     */
     protected int validateHeader(byte[] data) throws IOException {
         int magic = readIntBE(data, 0);
         if (magic != CisConstants.MAGIC) {
@@ -125,9 +154,7 @@ public abstract class AbstractCisDecoder<S, N> {
      * @throws IOException If data is truncated or invalid.
      */
     private int decodeSections(byte[] data, int offset, ChunkDelta<S, N> delta) throws IOException {
-        if (offset + 6 > data.length) {
-            throw new IOException("Truncated data: cannot read section header");
-        }
+        ensureAvailable(data, offset, 6, "section header");
 
         int sectionCount = readShortBE(data, offset) & 0xFFFF;
         offset += 2;
@@ -135,13 +162,10 @@ public abstract class AbstractCisDecoder<S, N> {
         int sectionDataLength = readIntBE(data, offset);
         offset += 4;
 
-        if (offset + sectionDataLength > data.length) {
-            throw new IOException(String.format(
-                    "Truncated data: expected %d bytes for sections, but only %d bytes remaining",
-                    sectionDataLength, data.length - offset));
-        }
+        ensureAvailable(data, offset, sectionDataLength, "sections");
 
         sectionReader.setData(data, offset, sectionDataLength);
+        delta.ensureBlockCapacity(sectionCount * SECTION_VOLUME);
 
         for (int i = 0; i < sectionCount; i++) {
             decodeSection(sectionReader, delta);
@@ -156,7 +180,7 @@ public abstract class AbstractCisDecoder<S, N> {
      * @param reader The bit reader positioned at the section start.
      * @param delta  The delta to populate.
      */
-    private void decodeSection(BitReader reader, ChunkDelta<S, N> delta) {
+    private void decodeSection(BitReader reader, ChunkDelta<S, N> delta) throws IOException {
         int sectionY = reader.readZigZag(CisConstants.SECTION_Y_BITS);
         int mode = (int) reader.read(1);
 
@@ -198,47 +222,67 @@ public abstract class AbstractCisDecoder<S, N> {
     /**
      * Decodes a dense section (full 16x16x16 array).
      */
-    private void decodeDenseSection(BitReader reader, ChunkDelta<S, N> delta, int sectionY, int globalBits) {
+    private void decodeDenseSection(BitReader reader, ChunkDelta<S, N> delta, int sectionY, int globalBits)
+            throws IOException {
         int paletteBits = (decodedVersion == 7) ? 8 : CisConstants.PALETTE_SIZE_BITS;
         int localSize = (int) reader.read(paletteBits);
+        validateLocalPaletteSize(localSize);
 
-        // Read local palette (maps local indices to global indices)
+        readLocalPalette(reader, localSize, globalBits);
+        int bitsPerBlock = calculateBitsNeeded(localSize + 1);
+        readDenseBlocks(reader, delta, sectionY, localSize, bitsPerBlock);
+    }
+
+    /**
+     * Rejects dense-section palette sizes that are negative or impossible for one section.
+     */
+    private static void validateLocalPaletteSize(int localSize) throws IOException {
+        if (localSize < 0 || localSize > SECTION_VOLUME) {
+            throw new IOException("Invalid local palette size: " + localSize);
+        }
+    }
+
+    /**
+     * Reads the dense-section local palette into {@link #localPaletteBuffer}.
+     */
+    private void readLocalPalette(BitReader reader, int localSize, int globalBits) {
         for (int i = 0; i < localSize; i++) {
             localPaletteBuffer[i] = (int) reader.read(globalBits);
         }
+    }
 
-        // the localSize was encoded as-is, but the bitsPerBlock used localSize + 1 to
-        // fit index 0 (null)
-        int bitsPerBlock = calculateBitsNeeded(localSize + 1);
-
-        // Read all blocks in YZX order
+    /**
+     * Expands a dense section by translating each local palette index back into a block state.
+     */
+    private void readDenseBlocks(
+            BitReader reader,
+            ChunkDelta<S, N> delta,
+            int sectionY,
+            int localSize,
+            int bitsPerBlock) {
         for (int y = 0; y < SECTION_SIZE; y++) {
             for (int z = 0; z < SECTION_SIZE; z++) {
                 for (int x = 0; x < SECTION_SIZE; x++) {
                     int localIndex = bitsPerBlock > 0 ? (int) reader.read(bitsPerBlock) : 0;
-
-                    // index 0 means no change (null)
                     if (localIndex == 0) {
                         continue;
                     }
 
-                    // shift back to 0-based palette index
                     int paletteIndex = localIndex - 1;
-
                     if (paletteIndex >= localSize) {
                         paletteIndex = 0;
                     }
 
                     int globalIndex = localPaletteBuffer[paletteIndex];
-                    S state = getStateFromPalette(globalIndex);
-
-                    if (state != null) {
-                        delta.addBlockChange(
-                                (byte) x,
-                                (sectionY << BITS_PER_NIBBLE) + y,
-                                (byte) z,
-                                state);
+                    if (globalIndex < 0 || globalIndex >= globalPalette.size()) {
+                        globalIndex = 0;
                     }
+
+                    delta.appendDecodedBlock(
+                            x,
+                            (sectionY << BITS_PER_NIBBLE) + y,
+                            z,
+                            globalIndex);
                 }
             }
         }
@@ -281,11 +325,11 @@ public abstract class AbstractCisDecoder<S, N> {
         for (int i = 0; i < count; i++) {
             int packedPos = dis.readInt();
             byte x = (byte) BlockInstruction.unpackX(packedPos);
-            int  y =         BlockInstruction.unpackY(packedPos);
+            int y = BlockInstruction.unpackY(packedPos);
             byte z = (byte) BlockInstruction.unpackZ(packedPos);
 
             try {
-                delta.addBlockEntityData(x, y, z, nbtAdapter.read(dis));
+                delta.addBlockEntityData(x, y, z, readNbtPayload(dis));
             } catch (IOException e) {
                 Chunkis.LOGGER.warn("Failed to decode block entity {}/{} at {}/{}/{}", i, count, x, y, z);
                 throw e;
@@ -310,7 +354,7 @@ public abstract class AbstractCisDecoder<S, N> {
 
             List<N> entities = new ArrayList<>(count);
             for (int i = 0; i < count; i++) {
-                entities.add(nbtAdapter.read(dis));
+                entities.add(readNbtPayload(dis));
             }
             delta.setEntities(entities, false);
 
@@ -329,7 +373,7 @@ public abstract class AbstractCisDecoder<S, N> {
     private void decodeChunkMetadata(DataInputStream dis, ChunkDelta<S, N> delta, int offset) throws IOException {
         try {
             if (dis.readBoolean()) {
-                delta.setChunkMetadata(nbtAdapter.read(dis), false);
+                delta.setChunkMetadata(readNbtPayload(dis), false);
             }
         } catch (EOFException e) {
             Chunkis.LOGGER.warn(
@@ -337,18 +381,72 @@ public abstract class AbstractCisDecoder<S, N> {
         }
     }
 
+    /**
+     * Reads one NBT payload using the format declared by the currently decoded CIS
+     * version.
+     */
+    private N readNbtPayload(DataInputStream dis) throws IOException {
+        if (decodedVersion >= 10) {
+            return nbtAdapter.readRaw(dis);
+        }
+        return nbtAdapter.readCompressed(dis);
+    }
+
+    /**
+     * Returns the minimum bit width needed to encode values in {@code [0, maxValue)}.
+     */
     protected static int calculateBitsNeeded(int maxValue) {
         if (maxValue <= 1)
             return 0;
         return 32 - Integer.numberOfLeadingZeros(maxValue - 1);
     }
 
+    /**
+     * Resolves a global palette index, falling back to {@link #airState} when the index is invalid.
+     */
     protected S getStateFromPalette(int index) {
         return (index >= 0 && index < globalPalette.size())
                 ? globalPalette.get(index)
                 : airState;
     }
 
+    /**
+     * Rejects global palette sizes that are negative or implausibly large for one chunk payload.
+     */
+    protected static void validateGlobalPaletteSize(int globalPaletteSize) throws IOException {
+        if (globalPaletteSize < 0 || globalPaletteSize > MAX_REASONABLE_PALETTE_SIZE) {
+            throw new IOException(String.format(
+                    "Invalid palette size: %d", globalPaletteSize));
+        }
+    }
+
+    /**
+     * Ensures that the requested byte span is fully present before the decoder reads it.
+     */
+    protected static void ensureAvailable(byte[] data, int offset, int length, String section) throws IOException {
+        if (offset < 0 || length < 0 || offset > data.length - length) {
+            throw new IOException("Truncated data: cannot read " + section);
+        }
+    }
+
+    /**
+     * Allocates storage for the next decoded global palette.
+     */
+    protected void beginGlobalPalette(int expectedSize) {
+        globalPalette = new ArrayList<>(expectedSize);
+    }
+
+    /**
+     * Records one decoded global palette entry in both the linear palette and delta palette view.
+     */
+    protected void addGlobalPaletteState(Palette<S> palette, S state) {
+        globalPalette.add(state);
+        palette.getOrAdd(state);
+    }
+
+    /**
+     * Reads a big-endian 32-bit integer from the raw payload.
+     */
     protected static int readIntBE(byte[] b, int off) {
         return ((b[off] & 0xFF) << 24)
                 | ((b[off + 1] & 0xFF) << 16)
@@ -356,6 +454,9 @@ public abstract class AbstractCisDecoder<S, N> {
                 | (b[off + 3] & 0xFF);
     }
 
+    /**
+     * Reads a big-endian 16-bit integer from the raw payload.
+     */
     protected static short readShortBE(byte[] b, int off) {
         return (short) (((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF));
     }

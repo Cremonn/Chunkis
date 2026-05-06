@@ -2,7 +2,7 @@ package io.liparakis.chunkis.migrator;
 
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.storage.CisStorage;
+import io.liparakis.chunkis.storage.io.CisStorage;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -28,6 +28,9 @@ import java.util.regex.Pattern;
  *
  * @param <S> block state type
  * @param <N> chunk NBT type
+ *
+ * @author Liparakis
+ * @version 1.0
  */
 public final class CisStorageMigrator<S, N> {
 
@@ -155,7 +158,7 @@ public final class CisStorageMigrator<S, N> {
         final CisChunkPos pos = new CisChunkPos(chunkX, chunkZ);
 
         try {
-            final ChunkDelta<S, N> delta = storage.load(pos);
+            final ChunkDelta<S, N> delta = storage.loadWithoutClearing(pos);
 
             if (delta == null || delta.isEmpty()) {
                 return report.addSkipped();

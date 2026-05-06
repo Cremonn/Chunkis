@@ -2,7 +2,7 @@ package io.liparakis.chunkis.mixin.world;
 
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.util.GlobalChunkTracker;
+import io.liparakis.chunkis.world.GlobalChunkTracker;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.WorldChunk;
 import org.spongepowered.asm.mixin.Mixin;
@@ -24,17 +24,13 @@ import java.util.Objects;
  * when its delta has unsaved changes — even if vanilla would report it clean.
  *
  * @author Liparakis
- * @version 1.0
+ * @version 1.1
  */
 @Mixin(Chunk.class)
 public abstract class CommonChunkMixin implements ChunkisDeltaDuck {
 
     @Unique
     private volatile ChunkDelta<?, ?> chunkis$delta = new ChunkDelta<>();
-
-    // -----------------------------------------------------------------------
-    // ChunkisDeltaDuck interface implementation
-    // -----------------------------------------------------------------------
 
     /**
      * {@inheritDoc}
@@ -53,10 +49,6 @@ public abstract class CommonChunkMixin implements ChunkisDeltaDuck {
     public void chunkis$setDelta(final ChunkDelta<?, ?> delta) {
         this.chunkis$delta = Objects.requireNonNull(delta, "ChunkDelta cannot be null");
     }
-
-    // -----------------------------------------------------------------------
-    // Mixin injection points
-    // -----------------------------------------------------------------------
 
     /**
      * Injected at the return of {@code needsSaving()} to override the result
@@ -81,13 +73,12 @@ public abstract class CommonChunkMixin implements ChunkisDeltaDuck {
      */
     @Inject(method = "markNeedsSaving", at = @At("HEAD"))
     private void chunkis$onMarkNeedsSaving(final CallbackInfo ci) {
-        this.chunkis$delta.markDirty();
+        if (!this.chunkis$delta.markDirtyIfClean()) {
+            return;
+        }
+
         notifyTrackerIfWorldChunk();
     }
-
-    // -----------------------------------------------------------------------
-    // Guard helpers
-    // -----------------------------------------------------------------------
 
     /**
      * Returns {@code true} if the saving flag should be overridden to {@code true}.
@@ -119,3 +110,4 @@ public abstract class CommonChunkMixin implements ChunkisDeltaDuck {
         }
     }
 }
+

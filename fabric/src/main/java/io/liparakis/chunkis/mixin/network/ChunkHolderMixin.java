@@ -26,7 +26,7 @@ import java.util.List;
  * to avoid repeated virtual dispatch.
  *
  * @author Liparakis
- * @version 1.1
+ * @version 1.2
  * @see ChunkHolder
  * @see ChunkisNetworking#sendDelta(ServerPlayerEntity, WorldChunk)
  */
@@ -71,10 +71,6 @@ public abstract class ChunkHolderMixin {
             ChunkisNetworking.sendDelta(player, chunk);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the given packet is a {@link ChunkDataS2CPacket}.

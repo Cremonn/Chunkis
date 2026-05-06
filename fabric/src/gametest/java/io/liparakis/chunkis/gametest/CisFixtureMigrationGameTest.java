@@ -5,9 +5,10 @@ import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.CisChunkPos;
 import io.liparakis.chunkis.migrator.CisMigrationReport;
 import io.liparakis.chunkis.migrator.CisStorageMigrator;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.util.CisNbtUtil;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.storage.CisNbtUtil;
+import io.liparakis.chunkis.storage.FabricCisStorageHelper;
+import io.liparakis.chunkis.storage.io.CisStorage;
+import io.liparakis.chunkis.storage.model.CisConstants;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -24,12 +25,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeSet;
+import java.util.*;
 
 /**
  * End-to-end GameTest coverage for migrating real V8 CIS fixtures through the
@@ -76,7 +72,7 @@ public final class CisFixtureMigrationGameTest {
     @GameTest(maxTicks = 400)
     public void migratesV8FixturesWithoutChangingLogicalChunkContents(final TestContext context) throws IOException {
         final ServerWorld world = context.getWorld();
-        final Path storageRoot = world.getServer().getSavePath(WorldSavePath.ROOT).resolve("chunkis");
+        final Path storageRoot = Objects.requireNonNull(world.getServer()).getSavePath(WorldSavePath.ROOT).resolve("chunkis");
         final Path regionsDir = storageRoot.resolve("regions");
 
         FabricCisStorageHelper.closeStorage(world);
@@ -107,7 +103,7 @@ public final class CisFixtureMigrationGameTest {
                     Text.literal("Expected to scan " + EXPECTED_SCANNED_CHUNKS + " chunk slots, got " + report.scannedChunks()));
 
             final Map<CisChunkPos, ChunkSnapshot> after =
-                    snapshotChunks(storage, populatedChunks, 9);
+                    snapshotChunks(storage, populatedChunks, CisConstants.VERSION);
             context.assertTrue(
                     before.equals(after),
                     Text.literal("Migrated chunk contents did not match the original fixture snapshot."));

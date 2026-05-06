@@ -1,149 +1,325 @@
 package io.liparakis.chunkis.core;
 
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import io.liparakis.chunkis.storage.model.CisConstants;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.longs.Long2IntMap;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
-import io.liparakis.chunkis.storage.CisConstants;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 
 /**
- * High-performance storage for modified block data within a chunk.
- * <p>
- * This class maintains a compact representation of block changes, block
- * entities,
- * and entities within a Minecraft chunk. It uses primitive collections from
- * fastutil
- * to minimize garbage collection pressure and avoid boxing/unboxing overhead.
- * </p>
- * <p>
- * The storage mechanism uses:
- * <ul>
- * <li>A palette-based system to deduplicate BlockState references</li>
- * <li>Packed long values to store position and palette index efficiently</li>
- * <li>A position map for O(1) lookups and updates</li>
- * <li>Lazy initialization for block entities to save memory when unused</li>
- * </ul>
- * </p>
+ * Compact storage for modified chunk data.
  *
- * @param <S> The BlockState type
- * @param <N> The NBT (or data tag) type for entities
+ * <p>This class stores sparse block changes, block entity payloads, entity
+ * payloads, and chunk-level metadata for one Minecraft chunk. It is designed for
+ * low allocation pressure and fast save/load paths.</p>
+ *
+ * <p>Storage layout:</p>
+ * <ul>
+ *   <li>block changes are stored as packed {@code long} instructions</li>
+ *   <li>block states are deduplicated through a palette</li>
+ *   <li>position lookup uses primitive fastutil maps</li>
+ *   <li>block entities and entities are allocated lazily</li>
+ *   <li>metadata may cache its pre-encoded payload for faster re-save</li>
+ * </ul>
+ *
+ * <p>This class is not internally synchronized. Callers must avoid concurrent
+ * mutation of the same delta instance.</p>
+ *
+ * @param <S> block state type
+ * @param <N> NBT/data payload type
+ *
  * @see BlockInstruction
  * @see Palette
+ *
+ * @author Liparakis
+ * @version 1.1
  */
 public final class ChunkDelta<S, N> {
+
+    /**
+     * Initial block instruction capacity.
+     */
     private static final int INITIAL_CAPACITY = 64;
 
     /**
-     * Packed block instructions stored as long values for memory efficiency
+     * Mask for the low 32 bits containing the packed local block position.
+     *
+     * <p>The high 32 bits store the palette id.</p>
+     */
+    private static final long POSITION_MASK = 0xFFFF_FFFFL;
+
+    /**
+     * Shared default predicate for deltas created without an air/empty-state test.
+     */
+    private static final Predicate<Object> NEVER_EMPTY_STATE = ignored -> false;
+
+    /**
+     * Packed block instructions.
+     *
+     * <p>Each instruction is laid out as:</p>
+     * <pre>{@code
+     * high 32 bits: palette id
+     * low  32 bits: packed local block position
+     * }</pre>
      */
     private long[] packedInstructions;
 
     /**
-     * Current number of block instructions
+     * Number of valid entries in {@link #packedInstructions}.
      */
     private int instructionCount;
 
     /**
-     * Palette mapping BlockStates to compact integer IDs
+     * Palette mapping block states to compact integer ids.
      */
     private final Palette<S> blockPalette;
 
     /**
-     * Map from packed position to instruction array index for O(1) lookups
+     * Packed position to instruction index lookup.
+     *
+     * <p>The default return value is {@code -1}, meaning absent.</p>
      */
-    private final Long2IntMap positionMap;
+    private final Long2IntOpenHashMap positionMap;
 
     /**
-     * Lazily-initialized map of block entity data, keyed by packed position
+     * Lazily allocated block entity payloads keyed by packed position.
      */
-    private Long2ObjectMap<N> blockEntities;
+    private Long2ObjectOpenHashMap<N> blockEntities;
 
     /**
-     * Active entities keyed by their runtime Entity ID for O(1) updates.
+     * Lazily allocated active entities keyed by runtime entity id.
      */
-    private final Int2ObjectMap<N> activeEntities;
+    private Int2ObjectOpenHashMap<N> activeEntities;
 
     /**
-     * Entities loaded from disk or network that haven't been spawned yet.
+     * Entity payloads loaded from disk/network that have not been spawned yet.
+     *
+     * <p>Starts as {@link Collections#emptyList()} to avoid allocating an
+     * {@link ArrayList} for block-only deltas.</p>
      */
     private List<N> pendingEntities;
 
     /**
-     * Chunk-level metadata needed to rebuild deterministic worldgen state
-     * correctly on reload, such as structure starts/references.
+     * Chunk-level metadata used to preserve deterministic reload state.
+     *
+     * <p>Examples include structure metadata, replay suppression flags, or a
+     * serialized vanilla-compatible base chunk payload.</p>
      */
     private N chunkMetadata;
 
     /**
-     * Tracks whether this delta has unsaved changes
+     * Cached encoded metadata payload, including the length prefix written by the
+     * NBT adapter.
      */
-    private boolean isDirty;
+    private byte[] encodedChunkMetadata;
 
-        /**
-     * CIS format version this delta was last decoded from.
+    /**
+     * Hash of {@link #encodedChunkMetadata}, used as a cheap first-pass equality
+     * check before byte comparison.
+     */
+    private int encodedChunkMetadataHash;
+
+    /**
+     * Monotonic generation incremented every time the delta mutates.
+     */
+    private long mutationGeneration;
+
+    /**
+     * Most recent generation known to be durably saved.
+     */
+    private long savedGeneration;
+
+    /**
+     * CIS format version this delta was decoded from or last saved as.
      */
     private int sourceVersion;
 
     /**
-     * Marks that this chunk has already gone through its first-worldgen pass and
-     * should suppress one-time repopulation side effects on restored loads.
+     * Whether restored loads should suppress one-time vanilla repopulation work.
      */
     private boolean suppressInitialRepopulation;
 
+    /**
+     * Predicate used to identify states that should clear block entity payloads.
+     */
     private final Predicate<S> isEmptyState;
 
     /**
-     * Constructs a new empty ChunkDelta with default initial capacity.
+     * Creates an empty delta with an explicit empty-state predicate.
      *
-     * @param isEmptyState Predicate to check if a state is considered "empty" (e.g.
-     *                     air)
+     * @param isEmptyState predicate used to identify empty states such as air
      */
-    public ChunkDelta(Predicate<S> isEmptyState) {
+    public ChunkDelta(final Predicate<S> isEmptyState) {
         this.packedInstructions = new long[INITIAL_CAPACITY];
         this.instructionCount = 0;
         this.blockPalette = new Palette<>();
         this.positionMap = new Long2IntOpenHashMap(INITIAL_CAPACITY);
         this.positionMap.defaultReturnValue(-1);
-        this.activeEntities = new Int2ObjectOpenHashMap<>();
-        this.pendingEntities = new ArrayList<>();
+        this.blockEntities = null;
+        this.activeEntities = null;
+        this.pendingEntities = Collections.emptyList();
         this.chunkMetadata = null;
-        this.isDirty = false;
+        this.encodedChunkMetadata = null;
+        this.encodedChunkMetadataHash = 0;
+        this.mutationGeneration = 0L;
+        this.savedGeneration = 0L;
         this.sourceVersion = CisConstants.VERSION;
         this.suppressInitialRepopulation = false;
-        this.isEmptyState = isEmptyState;
+        this.isEmptyState = Objects.requireNonNull(isEmptyState, "isEmptyState");
     }
 
     /**
-     * Constructs a new empty ChunkDelta with no empty-state check.
-     * Used when the predicate is not available (e.g., during decoding).
+     * Creates an empty delta with no empty-state predicate.
+     *
+     * <p>Used by decode paths where the block-state adapter is not available yet.
+     * In this mode, no state is treated as empty.</p>
      */
+    @SuppressWarnings("unchecked")
     public ChunkDelta() {
-        this(s -> false); // Default: nothing is considered empty
+        this((Predicate<S>) NEVER_EMPTY_STATE);
     }
 
-    // ==================== Block Changes ====================
+    /**
+     * Creates a shallow payload snapshot of this delta.
+     *
+     * <p>Use {@link #snapshot(UnaryOperator)} when {@code N} is mutable and the
+     * snapshot will be read from another thread.</p>
+     *
+     * @return a new ChunkDelta instance representing this delta's current state
+     */
+    public ChunkDelta<S, N> snapshot() {
+        return snapshot(UnaryOperator.identity());
+    }
 
     /**
-     * Adds or updates a block change at the specified position and marks this delta
-     * as dirty.
+     * Creates a snapshot of this delta, copying payload values with the supplied
+     * copier.
+     *
+     * <p>Container state is copied by this method. The caller owns the payload
+     * copy policy because core does not know whether {@code N} is immutable. For
+     * Minecraft NBT payloads, pass {@code NbtCompound::copy}.</p>
+     *
+     * @param payloadCopier copies each stored payload value
+     * @return a new ChunkDelta instance representing this delta's current state
      */
-    public void addBlockChange(int x, int y, int z, S newState) {
+    public ChunkDelta<S, N> snapshot(final UnaryOperator<N> payloadCopier) {
+        Objects.requireNonNull(payloadCopier, "payloadCopier");
+
+        final ChunkDelta<S, N> snap = new ChunkDelta<>(
+                this.blockPalette.copy(),
+                this.positionMap.clone(),
+                this.isEmptyState
+        );
+
+        snap.packedInstructions = Arrays.copyOf(this.packedInstructions, this.packedInstructions.length);
+        snap.instructionCount = this.instructionCount;
+
+        if (this.blockEntities != null) {
+            snap.blockEntities = new Long2ObjectOpenHashMap<>(this.blockEntities.size());
+            for (final Long2ObjectMap.Entry<N> entry : this.blockEntities.long2ObjectEntrySet()) {
+                snap.blockEntities.put(entry.getLongKey(), payloadCopier.apply(entry.getValue()));
+            }
+        }
+
+        if (this.activeEntities != null) {
+            snap.activeEntities = new Int2ObjectOpenHashMap<>(this.activeEntities.size());
+            for (final it.unimi.dsi.fastutil.ints.Int2ObjectMap.Entry<N> entry
+                    : this.activeEntities.int2ObjectEntrySet()) {
+                snap.activeEntities.put(entry.getIntKey(), payloadCopier.apply(entry.getValue()));
+            }
+        }
+
+        if (!this.pendingEntities.isEmpty()) {
+            snap.pendingEntities = new ArrayList<>(this.pendingEntities.size());
+            for (final N payload : this.pendingEntities) {
+                snap.pendingEntities.add(payloadCopier.apply(payload));
+            }
+        }
+
+        snap.chunkMetadata = this.chunkMetadata != null
+                ? payloadCopier.apply(this.chunkMetadata)
+                : null;
+
+        if (this.encodedChunkMetadata != null) {
+            snap.encodedChunkMetadata = Arrays.copyOf(this.encodedChunkMetadata, this.encodedChunkMetadata.length);
+            snap.encodedChunkMetadataHash = this.encodedChunkMetadataHash;
+        }
+
+        snap.mutationGeneration = this.mutationGeneration;
+        snap.savedGeneration = this.savedGeneration;
+        snap.sourceVersion = this.sourceVersion;
+        snap.suppressInitialRepopulation = this.suppressInitialRepopulation;
+
+        return snap;
+    }
+
+    /**
+     * Private constructor used by {@link #snapshot()} to initialize final fields.
+     */
+    private ChunkDelta(
+            final Palette<S> blockPalette,
+            final Long2IntOpenHashMap positionMap,
+            final Predicate<S> isEmptyState
+    ) {
+        this.blockPalette = blockPalette;
+        this.positionMap = positionMap;
+        this.isEmptyState = isEmptyState;
+        this.packedInstructions = new long[INITIAL_CAPACITY];
+        this.instructionCount = 0;
+        this.pendingEntities = Collections.emptyList();
+        this.sourceVersion = CisConstants.VERSION;
+    }
+
+    /**
+     * Records one semantic mutation.
+     */
+    private void markDirtyInternal() {
+        mutationGeneration++;
+    }
+
+    /**
+     * Adds or updates a block change and marks the delta dirty.
+     *
+     * @param x        local chunk X coordinate
+     * @param y        block Y coordinate
+     * @param z        local chunk Z coordinate
+     * @param newState new block state
+     */
+    public void addBlockChange(
+            final int x,
+            final int y,
+            final int z,
+            final S newState
+    ) {
         addBlockChange(x, y, z, newState, true);
     }
 
     /**
-     * Adds or updates a block change at the specified position.
+     * Adds or updates a block change.
+     *
+     * @param x         local chunk X coordinate
+     * @param y         block Y coordinate
+     * @param z         local chunk Z coordinate
+     * @param newState  new block state
+     * @param markDirty whether to mark the delta dirty when data changes
      */
-    public void addBlockChange(int x, int y, int z, S newState, boolean markDirty) {
+    public void addBlockChange(
+            final int x,
+            final int y,
+            final int z,
+            final S newState,
+            final boolean markDirty
+    ) {
         if (newState == null) {
             return;
         }
@@ -153,26 +329,29 @@ public final class ChunkDelta<S, N> {
         final int existingIndex = positionMap.get(posKey);
 
         if (existingIndex != -1) {
-            updateExistingInstruction(x, y, z, paletteId, existingIndex, markDirty);
+            updateExistingInstruction(paletteId, posKey, existingIndex, markDirty);
         } else {
-            addNewInstruction(x, y, z, paletteId, posKey, markDirty);
+            addNewInstruction(paletteId, posKey, markDirty);
         }
 
-        cleanupBlockEntityIfAir(newState, posKey);
+        cleanupBlockEntityIfEmpty(newState, posKey);
     }
 
     /**
-     * Updates an existing instruction in the packed array.
+     * Updates an existing block instruction.
      *
-     * @param x         Local X coordinate.
-     * @param y         Local Y coordinate.
-     * @param z         Local Z coordinate.
-     * @param paletteId The palette index for the block state.
-     * @param index     The index in the {@code packedInstructions} array.
-     * @param markDirty Whether to mark the delta as dirty.
+     * @param paletteId palette id for the new state
+     * @param posKey    packed local position
+     * @param index     existing instruction index
+     * @param markDirty whether to mark dirty if the instruction changes
      */
-    private void updateExistingInstruction(int x, int y, int z, int paletteId, int index, boolean markDirty) {
-        final long newInstruction = new BlockInstruction((byte) x, y, (byte) z, paletteId).pack();
+    private void updateExistingInstruction(
+            final int paletteId,
+            final long posKey,
+            final int index,
+            final boolean markDirty
+    ) {
+        final long newInstruction = packInstruction(paletteId, posKey);
 
         if (packedInstructions[index] == newInstruction) {
             return;
@@ -181,46 +360,53 @@ public final class ChunkDelta<S, N> {
         packedInstructions[index] = newInstruction;
 
         if (markDirty) {
-            this.isDirty = true;
+            markDirtyInternal();
         }
     }
 
     /**
-     * Adds a new instruction to the packed array.
+     * Appends a new block instruction.
      *
-     * @param x         Local X coordinate.
-     * @param y         Local Y coordinate.
-     * @param z         Local Z coordinate.
-     * @param paletteId The palette index for the block state.
-     * @param posKey    The packed position key.
-     * @param markDirty Whether to mark the delta as dirty.
+     * @param paletteId palette id for the state
+     * @param posKey    packed local position
+     * @param markDirty whether to mark dirty
      */
-    private void addNewInstruction(int x, int y, int z, int paletteId, long posKey, boolean markDirty) {
+    private void addNewInstruction(
+            final int paletteId,
+            final long posKey,
+            final boolean markDirty
+    ) {
         ensureCapacity();
-        packedInstructions[instructionCount] = new BlockInstruction((byte) x, y, (byte) z, paletteId).pack();
-        positionMap.put(posKey, instructionCount++);
+
+        packedInstructions[instructionCount] = packInstruction(paletteId, posKey);
+        positionMap.put(posKey, instructionCount);
+        instructionCount++;
 
         if (markDirty) {
-            this.isDirty = true;
+            markDirtyInternal();
         }
     }
 
     /**
-     * Removes block entity data if the new state is considered "empty" (e.g., air).
+     * Removes block entity payload if the new state is considered empty.
      *
-     * @param state  The new block state.
-     * @param posKey The packed position key.
+     * @param state  new block state
+     * @param posKey packed local position
      */
-    private void cleanupBlockEntityIfAir(S state, long posKey) {
-        if (isEmptyState.test(state) && blockEntities != null) {
+    private void cleanupBlockEntityIfEmpty(final S state, final long posKey) {
+        if (blockEntities != null && isEmptyState.test(state)) {
             blockEntities.remove(posKey);
         }
     }
 
     /**
-     * Removes a block change instruction at the specified position.
+     * Removes a block change and associated block entity data.
+     *
+     * @param x local chunk X coordinate
+     * @param y block Y coordinate
+     * @param z local chunk Z coordinate
      */
-    public synchronized void removeBlockChange(int x, int y, int z) {
+    public void removeBlockChange(final int x, final int y, final int z) {
         final long posKey = BlockInstruction.packPos(x, y, z);
         final int index = positionMap.get(posKey);
 
@@ -228,295 +414,634 @@ public final class ChunkDelta<S, N> {
             return;
         }
 
-        removeFromPositionMap(posKey);
+        positionMap.remove(posKey);
         removeBlockEntityData(posKey);
         swapWithLastAndShrink(index);
 
-        this.isDirty = true;
+        markDirtyInternal();
     }
 
     /**
-     * Removes the position key from the position map.
+     * Packs a palette id and position key into one block instruction.
      *
-     * @param posKey The packed position key.
+     * @param paletteId palette id
+     * @param posKey    packed local position
+     * @return packed instruction
      */
-    private void removeFromPositionMap(long posKey) {
-        positionMap.remove(posKey);
+    private static long packInstruction(final int paletteId, final long posKey) {
+        return ((long) paletteId << Integer.SIZE) | (posKey & POSITION_MASK);
     }
 
     /**
-     * Removes associated block entity data for the given position.
+     * Extracts the packed local position from an instruction.
      *
-     * @param posKey The packed position key.
+     * @param instruction packed instruction
+     * @return packed local position
      */
-    private void removeBlockEntityData(long posKey) {
+    private static long instructionPosKey(final long instruction) {
+        return instruction & POSITION_MASK;
+    }
+
+    /**
+     * Extracts the palette id from an instruction.
+     *
+     * @param instruction packed instruction
+     * @return palette id
+     */
+    private static int instructionPaletteId(final long instruction) {
+        return (int) (instruction >>> Integer.SIZE);
+    }
+
+    /**
+     * Removes block entity data for a packed position without marking dirty.
+     *
+     * @param posKey packed local position
+     */
+    private void removeBlockEntityData(final long posKey) {
         if (blockEntities != null) {
             blockEntities.remove(posKey);
         }
     }
 
     /**
-     * Removes associated block entity data for the given position and marks delta
-     * as dirty.
+     * Removes block entity data and marks the delta dirty if data existed.
+     *
+     * @param x local chunk X coordinate
+     * @param y block Y coordinate
+     * @param z local chunk Z coordinate
      */
-    public void removeBlockEntityData(int x, int y, int z) {
+    public void removeBlockEntityData(final int x, final int y, final int z) {
+        removeBlockEntityData(x, y, z, true);
+    }
+
+    /**
+     * Removes block entity data.
+     *
+     * @param x         local chunk X coordinate
+     * @param y         block Y coordinate
+     * @param z         local chunk Z coordinate
+     * @param markDirty whether to mark dirty if data was removed
+     */
+    public void removeBlockEntityData(
+            final int x,
+            final int y,
+            final int z,
+            final boolean markDirty
+    ) {
+        if (blockEntities == null) {
+            return;
+        }
+
         final long posKey = BlockInstruction.packPos(x, y, z);
-        if (blockEntities != null && blockEntities.containsKey(posKey)) {
-            blockEntities.remove(posKey);
-            this.isDirty = true;
+
+        if (blockEntities.remove(posKey) != null && markDirty) {
+            markDirtyInternal();
         }
     }
 
     /**
-     * Removes an instruction by swapping it with the last element and shrinking the
-     * array.
-     * <p>
-     * This avoids costly array copies (O(1) removal).
+     * Clears block and block-entity payloads.
      *
-     * @param index The index of the instruction to remove.
+     * <p>Used when a persisted serialized base chunk has taken ownership of the
+     * full block grid, leaving CIS block payloads to represent only future sparse
+     * edits.</p>
+     *
+     * @param markDirty whether to mark dirty if payloads were cleared
      */
-    private void swapWithLastAndShrink(int index) {
+    public void clearBlockPayloads(final boolean markDirty) {
+        if (instructionCount == 0 && (blockEntities == null || blockEntities.isEmpty())) {
+            return;
+        }
+
+        instructionCount = 0;
+        positionMap.clear();
+
+        if (blockEntities != null) {
+            blockEntities.clear();
+        }
+
+        if (markDirty) {
+            markDirtyInternal();
+        }
+    }
+
+    /**
+     * Removes an instruction in O(1) by swapping the last instruction into its slot.
+     *
+     * @param index instruction index to remove
+     */
+    private void swapWithLastAndShrink(final int index) {
         instructionCount--;
 
         if (index == instructionCount) {
+            packedInstructions[instructionCount] = 0L;
             return;
         }
 
         final long lastInstruction = packedInstructions[instructionCount];
-        packedInstructions[index] = lastInstruction;
+        final long lastPosKey = instructionPosKey(lastInstruction);
 
-        final BlockInstruction lastIns = BlockInstruction.fromPacked(lastInstruction);
-        final long lastPosKey = BlockInstruction.packPos(lastIns.x(), lastIns.y(), lastIns.z());
+        packedInstructions[index] = lastInstruction;
+        packedInstructions[instructionCount] = 0L;
         positionMap.put(lastPosKey, index);
     }
 
     /**
-     * Ensures the instructions array has enough capacity for a new element.
-     * Doubles capacity if needed.
+     * Ensures there is room for one additional block instruction.
      */
     private void ensureCapacity() {
         if (instructionCount < packedInstructions.length) {
             return;
         }
 
-        final long[] newArray = new long[packedInstructions.length << 1];
-        System.arraycopy(packedInstructions, 0, newArray, 0, instructionCount);
-        packedInstructions = newArray;
+        packedInstructions = Arrays.copyOf(
+                packedInstructions,
+                packedInstructions.length << 1
+        );
     }
 
-    // ==================== Block Entities ====================
+    /**
+     * Pre-sizes block instruction storage for bulk decode paths.
+     *
+     * @param additionalBlocks number of additional block instructions expected
+     */
+    public void ensureBlockCapacity(final int additionalBlocks) {
+        if (additionalBlocks <= 0) {
+            return;
+        }
 
-    public void addBlockEntityData(int x, int y, int z, N nbt) {
+        final int requiredCapacity = instructionCount + additionalBlocks;
+
+        if (requiredCapacity > packedInstructions.length) {
+            int newCapacity = packedInstructions.length;
+
+            while (newCapacity < requiredCapacity) {
+                newCapacity <<= 1;
+            }
+
+            packedInstructions = Arrays.copyOf(packedInstructions, newCapacity);
+        }
+
+        positionMap.ensureCapacity(requiredCapacity);
+    }
+
+    /**
+     * Appends a decoded block instruction.
+     *
+     * <p>The caller is expected to have validated the palette id and position
+     * uniqueness. This method still guards capacity because it is public API.</p>
+     *
+     * @param x         local chunk X coordinate
+     * @param y         block Y coordinate
+     * @param z         local chunk Z coordinate
+     * @param paletteId decoded palette id
+     */
+    public void appendDecodedBlock(
+            final int x,
+            final int y,
+            final int z,
+            final int paletteId
+    ) {
+        ensureCapacity();
+
+        final long posKey = BlockInstruction.packPos(x, y, z);
+
+        packedInstructions[instructionCount] = packInstruction(paletteId, posKey);
+        positionMap.put(posKey, instructionCount);
+        instructionCount++;
+    }
+
+    /**
+     * Adds or updates block entity data and marks the delta dirty.
+     *
+     * @param x   local chunk X coordinate
+     * @param y   block Y coordinate
+     * @param z   local chunk Z coordinate
+     * @param nbt block entity payload
+     */
+    public void addBlockEntityData(
+            final int x,
+            final int y,
+            final int z,
+            final N nbt
+    ) {
         addBlockEntityData(x, y, z, nbt, true);
     }
 
-    public void addBlockEntityData(int x, int y, int z, N nbt, boolean markDirty) {
+    /**
+     * Adds or updates block entity data.
+     *
+     * @param x         local chunk X coordinate
+     * @param y         block Y coordinate
+     * @param z         local chunk Z coordinate
+     * @param nbt       block entity payload
+     * @param markDirty whether to mark dirty if data changes
+     */
+    public void addBlockEntityData(
+            final int x,
+            final int y,
+            final int z,
+            final N nbt,
+            final boolean markDirty
+    ) {
         if (nbt == null) {
             return;
         }
 
         final long key = BlockInstruction.packPos(x, y, z);
+        final Long2ObjectOpenHashMap<N> entities = getOrCreateBlockEntities();
 
+        final N existing = entities.get(key);
+
+        if (existing == nbt || nbt.equals(existing)) {
+            return;
+        }
+
+        entities.put(key, nbt);
+
+        if (markDirty) {
+            markDirtyInternal();
+        }
+    }
+
+    /**
+     * Returns all block entity payloads.
+     *
+     * @return packed-position to block entity payload map
+     */
+    public Long2ObjectMap<N> getBlockEntities() {
+        return blockEntities == null
+                ? Long2ObjectMaps.emptyMap()
+                : blockEntities;
+    }
+
+    /**
+     * Clears all block entity payloads.
+     *
+     * @param markDirty whether to mark dirty when payloads were present
+     */
+    public void clearBlockEntityPayloads(final boolean markDirty) {
+        if (blockEntities == null || blockEntities.isEmpty()) {
+            return;
+        }
+
+        blockEntities.clear();
+
+        if (markDirty) {
+            markDirtyInternal();
+        }
+    }
+
+    /**
+     * Returns the mutable block entity map, allocating it on first use.
+     *
+     * @return mutable block entity map
+     */
+    private Long2ObjectOpenHashMap<N> getOrCreateBlockEntities() {
         if (blockEntities == null) {
             blockEntities = new Long2ObjectOpenHashMap<>();
         }
 
-        final N existing = blockEntities.get(key);
-        if (nbt.equals(existing)) {
+        return blockEntities;
+    }
+
+    /**
+     * Stores or updates an active entity payload.
+     *
+     * @param entityId runtime entity id
+     * @param nbt      entity payload
+     */
+    @SuppressWarnings("unused")
+    public void putEntity(final int entityId, final N nbt) {
+        if (nbt == null) {
             return;
         }
 
-        blockEntities.put(key, nbt);
+        getOrCreateActiveEntities().put(entityId, nbt);
+        markDirtyInternal();
+    }
 
-        if (markDirty) {
-            this.isDirty = true;
+    /**
+     * Removes an active entity by runtime id.
+     *
+     * @param entityId runtime entity id
+     */
+    @SuppressWarnings("unused")
+    public void removeEntity(final int entityId) {
+        if (activeEntities != null && activeEntities.remove(entityId) != null) {
+            markDirtyInternal();
         }
     }
 
-    public Long2ObjectMap<N> getBlockEntities() {
-        return blockEntities == null ? Long2ObjectMaps.emptyMap() : blockEntities;
-    }
-
-    // ==================== Entities ====================
-
-    public void putEntity(int entityId, N nbt) {
-        if (nbt != null) {
-            activeEntities.put(entityId, nbt);
-            this.isDirty = true;
-        }
-    }
-
-    public void removeEntity(int entityId) {
-        if (activeEntities.remove(entityId) != null) {
-            this.isDirty = true;
-        }
-    }
-
+    /**
+     * Clears all active entities.
+     */
+    @SuppressWarnings("unused")
     public void clearActiveEntities() {
-        if (!activeEntities.isEmpty()) {
+        if (activeEntities != null && !activeEntities.isEmpty()) {
             activeEntities.clear();
-            this.isDirty = true;
+            markDirtyInternal();
         }
     }
 
-    public void addPendingEntity(N nbt) {
-        if (nbt != null) {
-            this.pendingEntities.add(nbt);
-            this.isDirty = true;
+    /**
+     * Adds an entity payload to the pending spawn list.
+     *
+     * @param nbt entity payload
+     */
+    public void addPendingEntity(final N nbt) {
+        if (nbt == null) {
+            return;
         }
+
+        if (pendingEntities.isEmpty()) {
+            pendingEntities = new ArrayList<>(1);
+        }
+
+        pendingEntities.add(nbt);
+        markDirtyInternal();
     }
 
-    public void setEntities(List<N> newEntities) {
+    /**
+     * Replaces pending entities and marks dirty if the list changed.
+     *
+     * @param newEntities new pending entity list
+     */
+    public void setEntities(final List<N> newEntities) {
         setEntities(newEntities, true);
     }
 
-    public void setEntities(List<N> newEntities, boolean markDirty) {
-        final List<N> safeEntities = newEntities == null ? Collections.emptyList() : newEntities;
+    /**
+     * Replaces pending entities.
+     *
+     * @param newEntities new pending entity list
+     * @param markDirty   whether to mark dirty if the list changed
+     */
+    public void setEntities(final List<N> newEntities, final boolean markDirty) {
+        final List<N> safeEntities = normalizeEntityList(newEntities);
 
         if (!markDirty) {
-            this.pendingEntities = new ArrayList<>(safeEntities);
+            pendingEntities = safeEntities;
             return;
         }
 
-        if (this.pendingEntities.equals(safeEntities)) {
+        if (pendingEntities.equals(safeEntities)) {
             return;
         }
 
-        this.pendingEntities = new ArrayList<>(safeEntities);
-        this.isDirty = true;
+        pendingEntities = safeEntities;
+        markDirtyInternal();
     }
 
+    /**
+     * Returns active and pending entity payloads as one materialized list.
+     *
+     * @return combined entity payload list
+     */
     public List<N> getEntitiesList() {
-        List<N> allEntities = new ArrayList<>(activeEntities.values());
+        final int activeSize = activeEntities == null ? 0 : activeEntities.size();
+        final int pendingSize = pendingEntities.size();
+        final List<N> allEntities = new ArrayList<>(activeSize + pendingSize);
+
+        if (activeEntities != null) {
+            allEntities.addAll(activeEntities.values());
+        }
+
         allEntities.addAll(pendingEntities);
+
         return allEntities;
     }
 
-    public void clearPendingEntities() {
-        if (!this.pendingEntities.isEmpty()) {
-            this.pendingEntities.clear();
-            this.isDirty = true;
+    /**
+     * Counts non-null entity payloads without materializing a merged list.
+     *
+     * @return number of non-null entity payloads
+     */
+    public int countNonNullEntities() {
+        int count = 0;
+
+        if (activeEntities != null) {
+            for (final N nbt : activeEntities.values()) {
+                if (nbt != null) {
+                    count++;
+                }
+            }
+        }
+
+        for (final N nbt : pendingEntities) {
+            if (nbt != null) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /**
+     * Visits entity payloads in active-then-pending order.
+     *
+     * @param consumer entity payload consumer
+     */
+    public void forEachEntity(final Consumer<? super N> consumer) {
+        Objects.requireNonNull(consumer, "consumer");
+
+        if (activeEntities != null) {
+            for (final N nbt : activeEntities.values()) {
+                consumer.accept(nbt);
+            }
+        }
+
+        for (final N nbt : pendingEntities) {
+            consumer.accept(nbt);
         }
     }
 
-    // ==================== Chunk Metadata ====================
+    /**
+     * Clears pending entities.
+     */
+    public void clearPendingEntities() {
+        if (!pendingEntities.isEmpty()) {
+            pendingEntities = Collections.emptyList();
+            markDirtyInternal();
+        }
+    }
 
     /**
-     * Retrieves the chunk-level metadata tag.
+     * Returns the mutable active entity map, allocating it on first use.
      *
-     * @return The metadata as an NBT-like object, or {@code null} if not set.
+     * @return mutable active entity map
+     */
+    private Int2ObjectOpenHashMap<N> getOrCreateActiveEntities() {
+        if (activeEntities == null) {
+            activeEntities = new Int2ObjectOpenHashMap<>();
+        }
+
+        return activeEntities;
+    }
+
+    /**
+     * Copies an entity list into the internal representation.
+     *
+     * @param entities source entity list, may be {@code null}
+     * @return empty singleton or mutable copy
+     */
+    private static <N> List<N> normalizeEntityList(final List<N> entities) {
+        if (entities == null || entities.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        return new ArrayList<>(entities);
+    }
+
+    /**
+     * Returns chunk-level metadata.
+     *
+     * @return metadata payload, or {@code null}
      */
     public N getChunkMetadata() {
         return chunkMetadata;
     }
 
     /**
-     * Sets the chunk-level metadata and marks this delta as dirty.
+     * Sets chunk-level metadata and marks dirty if it changed.
      *
-     * @param metadata The new metadata to store.
+     * @param metadata metadata payload
      */
-    public void setChunkMetadata(N metadata) {
+    public void setChunkMetadata(final N metadata) {
         setChunkMetadata(metadata, true);
     }
 
     /**
-     * Updates the chunk-level metadata, optionally marking the delta as dirty.
+     * Sets chunk-level metadata.
      *
-     * @param metadata  The new metadata to store.
-     * @param markDirty Whether to mark the delta as dirty if the metadata changed.
+     * @param metadata  metadata payload
+     * @param markDirty whether to mark dirty if changed
      */
-    public void setChunkMetadata(N metadata, boolean markDirty) {
-        if (Objects.equals(this.chunkMetadata, metadata)) {
+    public void setChunkMetadata(final N metadata, final boolean markDirty) {
+        if (Objects.equals(chunkMetadata, metadata)) {
             return;
         }
 
-        this.chunkMetadata = metadata;
+        chunkMetadata = metadata;
+        encodedChunkMetadata = null;
+        encodedChunkMetadataHash = 0;
 
         if (markDirty) {
-            this.isDirty = true;
+            markDirtyInternal();
         }
     }
 
-    // ==================== Queries ====================
+    /**
+     * Updates chunk metadata using a pre-encoded payload.
+     *
+     * <p>The delta is marked dirty only when the encoded bytes change. The encoded
+     * payload is copied because callers may reuse or mutate their buffer.</p>
+     *
+     * @param metadata       metadata object to retain
+     * @param encodedPayload serialized payload including its length prefix
+     * @return {@code true} if metadata changed
+     */
+    @SuppressWarnings("UnusedReturnValue")
+    public boolean updateChunkMetadataWithEncodedPayload(
+            final N metadata,
+            final byte[] encodedPayload
+    ) {
+        if (metadata == null || encodedPayload == null) {
+            if (chunkMetadata == null && encodedChunkMetadata == null) {
+                return false;
+            }
 
-    public synchronized List<BlockInstruction> getBlockInstructions() {
+            setChunkMetadata(metadata, true);
+            return true;
+        }
+
+        final int newHash = Arrays.hashCode(encodedPayload);
+
+        if (encodedChunkMetadata != null
+                && encodedChunkMetadataHash == newHash
+                && Arrays.equals(encodedChunkMetadata, encodedPayload)) {
+            return false;
+        }
+
+        chunkMetadata = metadata;
+        encodedChunkMetadata = Arrays.copyOf(encodedPayload, encodedPayload.length);
+        encodedChunkMetadataHash = newHash;
+        markDirtyInternal();
+
+        return true;
+    }
+
+    /**
+     * Returns cached encoded metadata payload, if available.
+     *
+     * <p>The internal byte array is returned directly for performance. Callers must
+     * treat it as read-only.</p>
+     *
+     * @return encoded metadata payload, or {@code null}
+     */
+    public byte[] getEncodedChunkMetadata() {
+        return encodedChunkMetadata;
+    }
+
+    /**
+     * Caches an encoded metadata payload.
+     *
+     * @param encodedPayload encoded payload to cache, or {@code null} to clear
+     */
+    public void cacheEncodedChunkMetadata(final byte[] encodedPayload) {
+        if (encodedPayload == null) {
+            encodedChunkMetadata = null;
+            encodedChunkMetadataHash = 0;
+            return;
+        }
+
+        encodedChunkMetadata = Arrays.copyOf(encodedPayload, encodedPayload.length);
+        encodedChunkMetadataHash = Arrays.hashCode(encodedPayload);
+    }
+
+    /**
+     * Materializes block instructions as objects.
+     *
+     * <p>This allocates one {@link BlockInstruction} per block change and should
+     * be avoided on hot paths. Prefer {@link #forEachBlock(BlockVisitor)} when
+     * possible.</p>
+     *
+     * @return block instruction list
+     */
+    public List<BlockInstruction> getBlockInstructions() {
         final List<BlockInstruction> list = new ArrayList<>(instructionCount);
+
         for (int i = 0; i < instructionCount; i++) {
             list.add(BlockInstruction.fromPacked(packedInstructions[i]));
         }
+
         return list;
     }
 
+    /**
+     * Returns the block palette.
+     *
+     * @return block palette
+     */
     public Palette<S> getBlockPalette() {
         return blockPalette;
     }
 
+    /**
+     * Returns whether this delta has no payload.
+     *
+     * @return {@code true} if empty
+     */
     public boolean isEmpty() {
         return instructionCount == 0
                 && (blockEntities == null || blockEntities.isEmpty())
-                && activeEntities.isEmpty()
+                && (activeEntities == null || activeEntities.isEmpty())
                 && pendingEntities.isEmpty()
                 && chunkMetadata == null;
     }
 
-    // ==================== Dirty Flag ====================
-
-    public boolean isDirty() {
-        return isDirty;
-    }
-
-    public void markDirty() {
-        this.isDirty = true;
-    }
-
-    public void markSaved() {
-        this.isDirty = false;
-    }
-
     /**
-     * Returns the CIS format version this delta was decoded from.
-     *
-     * @return source CIS version associated with the loaded data
-     */
-    public int getSourceVersion() {
-        return sourceVersion;
-    }
-
-    /**
-     * Records the CIS format version this delta originated from.
-     *
-     * @param sourceVersion decoded source format version
-     */
-    public void setSourceVersion(int sourceVersion) {
-        this.sourceVersion = sourceVersion;
-    }
-
-    /**
-     * Returns whether restored loads for this chunk should suppress one-time
-     * vanilla repopulation work such as initial passive or structure-linked
-     * entity deployment.
-     *
-     * @return {@code true} if restored loads should suppress repopulation
-     */
-    public boolean shouldSuppressInitialRepopulation() {
-        return suppressInitialRepopulation;
-    }
-
-    /**
-     * Sets whether restored loads for this chunk should suppress one-time
-     * vanilla repopulation work.
-     *
-     * @param suppressInitialRepopulation {@code true} to suppress replayed
-     *                                    repopulation side effects
-     */
-    public void setSuppressInitialRepopulation(final boolean suppressInitialRepopulation) {
-        this.suppressInitialRepopulation = suppressInitialRepopulation;
-    }
-
-    // ==================== Visitor ====================
-
-    /**
-     * Interface for visiting delta contents.
+     * Visitor for all delta contents.
      */
     public interface DeltaVisitor<S, N> {
         void visitBlock(int x, int y, int z, S state);
@@ -526,42 +1051,174 @@ public final class ChunkDelta<S, N> {
         void visitEntity(N nbt);
     }
 
-    public void accept(DeltaVisitor<S, N> visitor) {
-        // 1. Visit block changes
+    /**
+     * Visitor for block-only scans.
+     */
+    @FunctionalInterface
+    public interface BlockVisitor<S> {
+        void visitBlock(int x, int y, int z, S state);
+    }
+
+    /**
+     * Visits blocks, block entities, and entities.
+     *
+     * @param visitor visitor to receive delta contents
+     */
+    public void accept(final DeltaVisitor<S, N> visitor) {
+        Objects.requireNonNull(visitor, "visitor");
+
+        forEachBlock(visitor::visitBlock);
+
+        if (blockEntities != null && !blockEntities.isEmpty()) {
+            for (final Long2ObjectMap.Entry<N> entry : blockEntities.long2ObjectEntrySet()) {
+                final long posKey = entry.getLongKey();
+
+                visitor.visitBlockEntity(
+                        BlockInstruction.unpackX(posKey),
+                        BlockInstruction.unpackY(posKey),
+                        BlockInstruction.unpackZ(posKey),
+                        entry.getValue()
+                );
+            }
+        }
+
+        if (activeEntities != null) {
+            for (final N nbt : activeEntities.values()) {
+                visitor.visitEntity(nbt);
+            }
+        }
+
+        for (final N nbt : pendingEntities) {
+            visitor.visitEntity(nbt);
+        }
+    }
+
+    /**
+     * Visits block changes only.
+     *
+     * <p>This avoids materializing {@link BlockInstruction} objects and is the
+     * preferred hot-path block iteration API.</p>
+     *
+     * @param visitor block visitor
+     */
+    public void forEachBlock(final BlockVisitor<S> visitor) {
+        Objects.requireNonNull(visitor, "visitor");
+
         for (int i = 0; i < instructionCount; i++) {
-            long packed = packedInstructions[i];
-            int paletteIndex = (int) (packed >> 32);
-            S state = blockPalette.get(paletteIndex);
+            final long instruction = packedInstructions[i];
+            final int paletteIndex = instructionPaletteId(instruction);
+            final S state = blockPalette.get(paletteIndex);
 
             if (state == null) {
                 continue;
             }
 
-            int x = BlockInstruction.unpackX(packed);
-            int y = BlockInstruction.unpackY(packed);
-            int z = BlockInstruction.unpackZ(packed);
+            final long posKey = instructionPosKey(instruction);
 
-            visitor.visitBlock(x, y, z, state);
+            visitor.visitBlock(
+                    BlockInstruction.unpackX(posKey),
+                    BlockInstruction.unpackY(posKey),
+                    BlockInstruction.unpackZ(posKey),
+                    state
+            );
+        }
+    }
+
+    /**
+     * Returns whether this delta has unsaved changes.
+     *
+     * @return {@code true} if dirty
+     */
+    public boolean isDirty() {
+        return mutationGeneration != savedGeneration;
+    }
+
+    /**
+     * Marks this delta dirty.
+     */
+    public void markDirty() {
+        markDirtyInternal();
+    }
+
+    /**
+     * Marks this delta dirty only if it was previously clean.
+     *
+     * @return {@code true} if this call changed the dirty state
+     */
+    public boolean markDirtyIfClean() {
+        if (isDirty()) {
+            return false;
         }
 
-        // 2. Visit block entities
-        if (blockEntities != null && !blockEntities.isEmpty()) {
-            for (Long2ObjectMap.Entry<N> entry : blockEntities.long2ObjectEntrySet()) {
-                long pos = entry.getLongKey();
-                int x = BlockInstruction.unpackX(pos);
-                int y = BlockInstruction.unpackY(pos);
-                int z = BlockInstruction.unpackZ(pos);
+        markDirtyInternal();
+        return true;
+    }
 
-                visitor.visitBlockEntity(x, y, z, entry.getValue());
-            }
+    /**
+     * Marks this delta saved.
+     */
+    public void markSaved() {
+        savedGeneration = mutationGeneration;
+    }
+
+    /**
+     * Marks this delta saved only if no newer mutation has happened since the
+     * given generation was captured.
+     *
+     * @param generation generation that was persisted
+     * @return {@code true} if the save state was updated
+     */
+    public boolean markSavedIfGeneration(final long generation) {
+        if (mutationGeneration != generation) {
+            return false;
         }
 
-        // 3. Visit global entities
-        List<N> allEntities = getEntitiesList();
-        if (!allEntities.isEmpty()) {
-            for (N nbt : allEntities) {
-                visitor.visitEntity(nbt);
-            }
-        }
+        savedGeneration = generation;
+        return true;
+    }
+
+    /**
+     * Returns the current mutation generation.
+     *
+     * @return mutation generation
+     */
+    public long getMutationGeneration() {
+        return mutationGeneration;
+    }
+
+    /**
+     * Returns the CIS source format version.
+     *
+     * @return source CIS version
+     */
+    public int getSourceVersion() {
+        return sourceVersion;
+    }
+
+    /**
+     * Sets the CIS source format version.
+     *
+     * @param sourceVersion source CIS version
+     */
+    public void setSourceVersion(final int sourceVersion) {
+        this.sourceVersion = sourceVersion;
+    }
+
+    /**
+     * Returns whether restored loads should suppress one-time vanilla repopulation.
+     *
+     * @return {@code true} if suppression is enabled
+     */
+    public boolean shouldSuppressInitialRepopulation() {
+        return suppressInitialRepopulation;
+    }
+
+    /**
+     * Sets replay-time repopulation suppression.
+     *
+     * @param suppressInitialRepopulation {@code true} to suppress repopulation
+     */
+    public void setSuppressInitialRepopulation(final boolean suppressInitialRepopulation) {
+        this.suppressInitialRepopulation = suppressInitialRepopulation;
     }
 }

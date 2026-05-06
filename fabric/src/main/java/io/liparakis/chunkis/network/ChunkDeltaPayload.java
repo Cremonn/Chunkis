@@ -51,11 +51,9 @@ public record ChunkDeltaPayload(
         boolean compressed,
         int uncompressedSize) implements CustomPayload {
 
-    // -------------------------------------------------------------------------
-    // Constants
-    // -------------------------------------------------------------------------
-
-    /** Hard cap on incoming payload data length to guard against malformed packets. */
+    /**
+     * Hard cap on incoming payload data length to guard against malformed packets.
+     */
     private static final int MAX_PAYLOAD_SIZE = 1024 * 1024; // 1 MB
 
     /**
@@ -70,18 +68,20 @@ public record ChunkDeltaPayload(
      */
     private static final double COMPRESSION_RATIO_THRESHOLD = 0.9;
 
-    /** Wire flag indicating the payload data is zlib-compressed. */
-    private static final byte FLAG_COMPRESSED   = (byte) 0x01;
+    /**
+     * Wire flag indicating the payload data is zlib-compressed.
+     */
+    private static final byte FLAG_COMPRESSED = (byte) 0x01;
 
-    /** Wire flag indicating the payload data is uncompressed. */
+    /**
+     * Wire flag indicating the payload data is uncompressed.
+     */
     private static final byte FLAG_UNCOMPRESSED = (byte) 0x00;
 
-    /** Scratch buffer size for deflate/inflate loops. */
+    /**
+     * Scratch buffer size for deflate/inflate loops.
+     */
     private static final int COMPRESSION_BUFFER_SIZE = 8192;
-
-    // -------------------------------------------------------------------------
-    // Thread-local codec pools
-    // -------------------------------------------------------------------------
 
     /**
      * Per-thread {@link Deflater} pool. Configured at {@link Deflater#BEST_SPEED}
@@ -97,21 +97,17 @@ public record ChunkDeltaPayload(
     private static final ThreadLocal<Inflater> INFLATER_POOL =
             ThreadLocal.withInitial(Inflater::new);
 
-    // -------------------------------------------------------------------------
-    // Fabric packet infrastructure
-    // -------------------------------------------------------------------------
-
-    /** Packet channel identifier: {@code <modId>:chunk_delta}. */
+    /**
+     * Packet channel identifier: {@code <modId>:chunk_delta}.
+     */
     public static final CustomPayload.Id<ChunkDeltaPayload> ID =
             new CustomPayload.Id<>(Identifier.of(Chunkis.MOD_ID, "chunk_delta"));
 
-    /** Codec wiring the static {@link #read} and instance {@link #write} methods. */
+    /**
+     * Codec wiring the static {@link #read} and instance {@link #write} methods.
+     */
     public static final PacketCodec<RegistryByteBuf, ChunkDeltaPayload> CODEC =
             PacketCodec.of(ChunkDeltaPayload::write, ChunkDeltaPayload::read);
-
-    // -------------------------------------------------------------------------
-    // Factory
-    // -------------------------------------------------------------------------
 
     /**
      * Creates a payload from raw (uncompressed) delta bytes, compressing
@@ -145,10 +141,6 @@ public record ChunkDeltaPayload(
         return new ChunkDeltaPayload(Arrays.copyOf(rawData, rawData.length), chunkX, chunkZ, false, 0);
     }
 
-    // -------------------------------------------------------------------------
-    // Wire read / write
-    // -------------------------------------------------------------------------
-
     /**
      * Deserializes a {@link ChunkDeltaPayload} from the given packet buffer.
      *
@@ -161,9 +153,9 @@ public record ChunkDeltaPayload(
      */
     private static ChunkDeltaPayload read(final RegistryByteBuf buf) {
         try {
-            final int chunkX       = buf.readInt();
-            final int chunkZ       = buf.readInt();
-            final byte flags       = buf.readByte();
+            final int chunkX = buf.readInt();
+            final int chunkZ = buf.readInt();
+            final byte flags = buf.readByte();
             final boolean isCompressed = isCompressedFlag(flags);
 
             final int dataLength = buf.readInt();
@@ -206,10 +198,6 @@ public record ChunkDeltaPayload(
             buf.writeInt(uncompressedSize);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Compression
-    // -------------------------------------------------------------------------
 
     /**
      * Compresses {@code data} using the thread-local {@link Deflater}.
@@ -268,10 +256,6 @@ public record ChunkDeltaPayload(
         return result;
     }
 
-    // -------------------------------------------------------------------------
-    // Validation helpers
-    // -------------------------------------------------------------------------
-
     /**
      * Throws {@link IllegalArgumentException} if the given length is negative or
      * exceeds {@link #MAX_PAYLOAD_SIZE}.
@@ -300,10 +284,6 @@ public record ChunkDeltaPayload(
                     "Decompression size mismatch: expected %d bytes, got %d bytes", expected, actual));
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the raw data is large enough to make compression worthwhile.
@@ -336,10 +316,6 @@ public record ChunkDeltaPayload(
     private static boolean isCompressedFlag(final byte flags) {
         return (flags & FLAG_COMPRESSED) != 0;
     }
-
-    // -------------------------------------------------------------------------
-    // CustomPayload
-    // -------------------------------------------------------------------------
 
     @Override
     public Id<? extends CustomPayload> getId() {

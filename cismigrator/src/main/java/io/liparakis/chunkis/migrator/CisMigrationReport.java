@@ -3,10 +3,14 @@ package io.liparakis.chunkis.migrator;
 /**
  * Immutable summary of a CIS migration run.
  *
- * @param scannedChunks total chunk positions inspected
+ * @param scannedChunks  total chunk positions inspected
  * @param migratedChunks total chunks rewritten to the target format
- * @param skippedChunks chunk positions that were valid but needed no migration
- * @param failedChunks chunk positions that failed to migrate
+ * @param skippedChunks  chunk positions that were valid but needed no migration
+ * @param failedChunks   chunk positions that failed to migrate
+ *
+ * @author Liparakis
+ * @version 1.0
+ *
  */
 public record CisMigrationReport(
         int scannedChunks,

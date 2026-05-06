@@ -3,18 +3,20 @@ package io.liparakis.chunkis.storage.codec;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.CisAdapter;
+import io.liparakis.chunkis.storage.mapping.CisAdapter;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.List;
 
 /**
- * Encoder for Chunkis CIS format (V7) with paletted section storage and dynamic
+ * Encoder for the Chunkis CIS format with paletted section storage and dynamic
  * property bit-packing.
  *
  * @param <S> The BlockState type
  * @param <N> The NBT type
+ *
+ * @version 1
+ * @author Liparakis
  */
 public final class CisEncoder<S, N> extends AbstractCisEncoder<S, N> {
 
@@ -24,6 +26,7 @@ public final class CisEncoder<S, N> extends AbstractCisEncoder<S, N> {
     @SuppressWarnings("rawtypes")
     private static final ThreadLocal<EncoderContext> CONTEXT = ThreadLocal.withInitial(EncoderContext::new);
 
+    /** Palette adapter that knows how to encode one block-state entry into the CIS palette stream. */
     private final CisAdapter<S> cisAdapter;
 
     /**
@@ -36,32 +39,19 @@ public final class CisEncoder<S, N> extends AbstractCisEncoder<S, N> {
     }
 
     /**
-     * Encodes a ChunkDelta into the Chunkis V7 binary format.
+     * Encodes a ChunkDelta into the current Chunkis CIS binary format.
      */
     public byte[] encode(ChunkDelta<S, N> delta) throws IOException {
         return encodeInternal(delta);
     }
 
     @Override
-    protected void writeGlobalPalette(
+    protected void writeGlobalPaletteEntry(
             DataOutputStream dos,
             EncoderContext<S> ctx,
-            List<S> usedStates) throws IOException {
-
-        ctx.globalIdMap.defaultReturnValue(-1);
-        dos.writeInt(usedStates.size());
-        ctx.bitWriter.reset();
-
-        for (int i = 0; i < usedStates.size(); i++) {
-            S state = usedStates.get(i);
-            dos.writeShort(cisAdapter.getBlockId(state));
-            cisAdapter.writeStateProperties(ctx.bitWriter, state);
-            ctx.globalIdMap.put(state, i);
-        }
-
-        byte[] palettePropertyData = ctx.bitWriter.toByteArray();
-        dos.writeInt(palettePropertyData.length);
-        dos.write(palettePropertyData);
+            S state) throws IOException {
+        dos.writeShort(cisAdapter.getBlockId(state));
+        cisAdapter.writeStateProperties(ctx.bitWriter, state);
     }
 
     @SuppressWarnings("unchecked")

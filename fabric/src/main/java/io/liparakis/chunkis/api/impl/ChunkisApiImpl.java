@@ -3,8 +3,8 @@ package io.liparakis.chunkis.api.impl;
 import io.liparakis.chunkis.api.ChunkisApi;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
+import io.liparakis.chunkis.storage.io.CisStorage;
+import io.liparakis.chunkis.storage.FabricCisStorageHelper;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
@@ -43,10 +43,6 @@ public final class ChunkisApiImpl implements ChunkisApi {
     public static ChunkisApiImpl getInstance() {
         return INSTANCE;
     }
-
-    // -------------------------------------------------------------------------
-    // ChunkisApi API
-    // -------------------------------------------------------------------------
 
     /**
      * {@inheritDoc}
@@ -90,10 +86,6 @@ public final class ChunkisApiImpl implements ChunkisApi {
         return isNonEmptyDelta(delta);
     }
 
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
-
     /**
      * Returns true if the given chunk implements the {@link ChunkisDeltaDuck}
      * interface,
@@ -115,10 +107,6 @@ public final class ChunkisApiImpl implements ChunkisApi {
     private static boolean isNonEmptyDelta(final ChunkDelta<?, ?> delta) {
         return delta != null && !delta.isEmpty();
     }
-
-    // -------------------------------------------------------------------------
-    // Cast helpers
-    // -------------------------------------------------------------------------
 
     /**
      * Casts the given chunk to {@link ChunkisDeltaDuck}.

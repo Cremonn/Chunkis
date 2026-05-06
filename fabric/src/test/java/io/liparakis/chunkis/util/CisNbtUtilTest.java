@@ -1,6 +1,7 @@
 package io.liparakis.chunkis.util;
 
 import io.liparakis.chunkis.core.ChunkDelta;
+import io.liparakis.chunkis.storage.CisNbtUtil;
 import net.minecraft.nbt.NbtCompound;
 import org.junit.jupiter.api.Test;
 

@@ -5,9 +5,10 @@ import io.liparakis.chunkis.core.CisChunkPos;
 import io.liparakis.chunkis.spi.BlockRegistryAdapter;
 import io.liparakis.chunkis.spi.BlockStateAdapter;
 import io.liparakis.chunkis.spi.NbtAdapter;
-import io.liparakis.chunkis.storage.CisMapping;
-import io.liparakis.chunkis.storage.CisStorage;
-import io.liparakis.chunkis.storage.PropertyPacker;
+import io.liparakis.chunkis.storage.mapping.CisMapping;
+import io.liparakis.chunkis.storage.io.CisStorage;
+import io.liparakis.chunkis.storage.mapping.PropertyPacker;
+import io.liparakis.chunkis.storage.model.CisConstants;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -18,12 +19,13 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Comparator;
+import java.util.Collection;
 import java.util.List;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Unit tests for {@link CisStorageMigrator} using an in-process string-backed
@@ -39,7 +41,7 @@ class CisStorageMigratorTest {
 
     /** Number of chunk slots per region file (32 × 32). */
     private static final int REGION_SLOTS = 1024;
-    private static final int CURRENT_VERSION = 9;
+    private static final int CURRENT_VERSION = CisConstants.VERSION;
     private static final int LEGACY_VERSION = 8;
 
     /** Bytes per chunk header entry (offset int + length int). */
@@ -104,6 +106,37 @@ class CisStorageMigratorTest {
         final CisMigrationReport report = migrator(harness).migrateStorage(harness.regionsDir());
 
         assertReport(report, 0, 0, 0);
+        harness.close();
+    }
+
+    /**
+     * Verifies that migration failures do not delete the source chunk entry.
+     *
+     * <p>This is the critical data-safety property for upgrades: a chunk that
+     * cannot be decoded by the current migrator must remain on disk for future
+     * salvage instead of being cleared as "corrupt" during the migration scan.</p>
+     */
+    @Test
+    void migrationFailureDoesNotDeleteSourceChunkEntry() throws Exception {
+        final TestStorageHarness harness = createHarness();
+        final CisChunkPos legacyPos = new CisChunkPos(0, 0);
+
+        harness.saveChunk(legacyPos, "stone");
+        harness.rewriteChunkVersionToLegacy(legacyPos);
+        assertTrue(harness.chunkEntryExists(legacyPos), "Expected legacy chunk entry before corruption.");
+
+        harness.corruptChunkPayload(legacyPos);
+
+        final CisMigrationReport report = migrator(harness).migrateStorage(harness.regionsDir());
+
+        assertEquals(REGION_SLOTS, report.scannedChunks());
+        assertEquals(0, report.migratedChunks());
+        assertEquals(REGION_SLOTS - 1, report.skippedChunks());
+        assertEquals(1, report.failedChunks());
+        assertTrue(
+                harness.chunkEntryExists(legacyPos),
+                "Migration must preserve the original chunk bytes when decode fails.");
+
         harness.close();
     }
 
@@ -252,6 +285,52 @@ class CisStorageMigratorTest {
         }
 
         /**
+         * Corrupts the stored payload for {@code pos} without removing the region
+         * header entry, simulating a decode failure during migration.
+         *
+         * @param pos target chunk position
+         */
+        void corruptChunkPayload(final CisChunkPos pos) throws Exception {
+            storage.close();
+
+            final Path regionFile = regionsDir.resolve(
+                    "r." + (pos.x() >> 5) + "." + (pos.z() >> 5) + ".cis");
+            final byte[] regionBytes = Files.readAllBytes(regionFile);
+
+            final int index = (pos.x() & 31) + (pos.z() & 31) * 32;
+            final int headerOffset = index * HEADER_ENTRY_BYTES;
+            final int chunkOffset = readInt(regionBytes, headerOffset);
+
+            regionBytes[chunkOffset] ^= (byte) 0x7F;
+
+            Files.write(regionFile, regionBytes);
+            storage = openStorage(storageRoot, regionsDir);
+        }
+
+        /**
+         * Returns whether the region header still points at a stored chunk entry.
+         *
+         * @param pos target chunk position
+         * @return {@code true} if the region slot is still populated
+         */
+        boolean chunkEntryExists(final CisChunkPos pos) throws Exception {
+            storage.close();
+
+            final Path regionFile = regionsDir.resolve(
+                    "r." + (pos.x() >> 5) + "." + (pos.z() >> 5) + ".cis");
+            final byte[] regionBytes = Files.readAllBytes(regionFile);
+
+            final int index = (pos.x() & 31) + (pos.z() & 31) * 32;
+            final int headerOffset = index * HEADER_ENTRY_BYTES;
+            final boolean exists =
+                    readInt(regionBytes, headerOffset) > 0
+                            && readInt(regionBytes, headerOffset + 4) > 0;
+
+            storage = openStorage(storageRoot, regionsDir);
+            return exists;
+        }
+
+        /**
          * Closes the underlying storage and releases file handles.
          */
         void close() {
@@ -317,6 +396,7 @@ class CisStorageMigratorTest {
         @Override public String getId(final String block)    { return block; }
         @Override public String getBlock(final String id)    { return id; }
         @Override public String getAir()                     { return "air"; }
+        @Override public Collection<String> getRegisteredBlocks() { return List.of("air", "stone", "dirt"); }
     }
 
     /** Stub implementation of {@link BlockStateAdapter} for testing. */
@@ -328,8 +408,6 @@ class CisStorageMigratorTest {
         @Override public List<Object> getPropertyValues(final String property)                       { return List.of(); }
         @Override public int getValueIndex(final String state, final String property)                { return 0; }
         @Override public String withProperty(final String state, final String property, final int i) { return state; }
-        @Override public Comparator<Object> getValueComparator() { return Comparator.comparing(Object::toString); }
-        @Override public boolean isAir(final String state)       { return "air".equals(state); }
     }
 
     /** Stub implementation of {@link NbtAdapter} for testing. */

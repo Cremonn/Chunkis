@@ -3,8 +3,7 @@ package io.liparakis.chunkis.network;
 import io.liparakis.chunkis.Chunkis;
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
 import io.liparakis.chunkis.core.ChunkDelta;
-import io.liparakis.chunkis.storage.codec.CisNetworkEncoder;
-import io.liparakis.chunkis.util.FabricNetworkCodecFactory;
+import io.liparakis.chunkis.storage.codec.network.CisNetworkEncoder;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.ChunkPos;
@@ -59,10 +58,6 @@ public final class ChunkisNetworking {
         throw new AssertionError("Utility class");
     }
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
-
     /**
      * Encodes the chunk's Chunkis delta and sends it to {@code player}.
      *
@@ -82,10 +77,6 @@ public final class ChunkisNetworking {
         encodAndSend(player, chunk.getPos(), delta);
     }
 
-    // -------------------------------------------------------------------------
-    // Delta extraction
-    // -------------------------------------------------------------------------
-
     /**
      * Returns the non-empty delta from the chunk's duck interface, or null if
      * the chunk does not implement {@link ChunkisDeltaDuck} or its delta is absent.
@@ -100,13 +91,6 @@ public final class ChunkisNetworking {
         final ChunkDelta<?, ?> delta = deltaDuck.chunkis$getDelta();
         return (delta == null || delta.isEmpty()) ? null : delta;
     }
-
-    // Method captureCurrentState removed because we are using proactive capture
-    // now.
-
-    // -------------------------------------------------------------------------
-    // Encode and send
-    // -------------------------------------------------------------------------
 
     /**
      * Encodes the delta, enforces the size limit, creates a
@@ -142,10 +126,6 @@ public final class ChunkisNetworking {
             Chunkis.LOGGER.error("Chunkis: Failed to send delta for chunk ({}, {})", pos.x, pos.z, e);
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
 
     /**
      * Returns true if the player is no longer reachable (removed or disconnected).

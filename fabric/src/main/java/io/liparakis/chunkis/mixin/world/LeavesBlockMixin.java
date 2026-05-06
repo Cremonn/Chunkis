@@ -1,14 +1,12 @@
 package io.liparakis.chunkis.mixin.world;
 
-import io.liparakis.chunkis.util.LeafTickContext;
-import io.liparakis.chunkis.util.LeafTickContext.ContextHandle;
+import io.liparakis.chunkis.world.LeafTickContext;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.random.Random;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -40,17 +38,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class LeavesBlockMixin {
 
     /**
-     * ThreadLocal storage for the context handle between HEAD and TAIL injections.
-     * Required because Mixin injection points can't share local variables.
-     */
-    @Unique
-    private static final ThreadLocal<ContextHandle> chunkis$activeHandle = new ThreadLocal<>();
-
-    // -----------------------------------------------------------------------
-    // Mixin injection points
-    // -----------------------------------------------------------------------
-
-    /**
      * Enters the leaf tick context before the scheduled tick runs.
      *
      * @param state  the current block state of the leaves
@@ -67,7 +54,7 @@ public class LeavesBlockMixin {
             final BlockPos pos,
             final Random random,
             final CallbackInfo ci) {
-        chunkis$activeHandle.set(LeafTickContext.enter());
+        LeafTickContext.enterDirect();
     }
 
     /**
@@ -88,14 +75,7 @@ public class LeavesBlockMixin {
             final BlockPos pos,
             final Random random,
             final CallbackInfo ci) {
-        try {
-            final ContextHandle handle = chunkis$activeHandle.get();
-            if (handle != null) {
-                handle.close();
-            }
-        } finally {
-            // Always remove from ThreadLocal to prevent memory leaks in thread pools
-            chunkis$activeHandle.remove();
-        }
+        LeafTickContext.exitDirect();
     }
 }
+

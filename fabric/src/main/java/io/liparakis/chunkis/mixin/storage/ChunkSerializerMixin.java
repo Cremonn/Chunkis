@@ -1,14 +1,20 @@
 package io.liparakis.chunkis.mixin.storage;
 
 import io.liparakis.chunkis.api.ChunkisDeltaDuck;
+import io.liparakis.chunkis.core.BlockInstruction;
 import io.liparakis.chunkis.core.ChunkDelta;
 import io.liparakis.chunkis.core.CisChunkPos;
-import io.liparakis.chunkis.util.CisNbtUtil;
-import io.liparakis.chunkis.util.FabricCisStorageHelper;
-import io.liparakis.chunkis.util.GlobalChunkTracker;
+import io.liparakis.chunkis.mixin.accessor.ChunkBlockEntityNbtAccessor;
+import io.liparakis.chunkis.storage.CisNbtUtil;
+import io.liparakis.chunkis.storage.FabricCisStorageHelper;
+import io.liparakis.chunkis.storage.io.CisStorage;
+import io.liparakis.chunkis.world.GlobalChunkTracker;
+import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.ProtoChunk;
 import net.minecraft.world.chunk.SerializedChunk;
@@ -21,32 +27,41 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Intercepts {@link SerializedChunk#convert} to restore Chunkis delta data
- * into freshly converted {@link ProtoChunk} instances.
+ * Intercepts {@link SerializedChunk#convert} to attach Chunkis delta data to
+ * freshly converted {@link ProtoChunk} instances.
  *
- * <p>
- * Injected at {@code RETURN} so the vanilla conversion path completes first.
- * The delta is loaded via a memory-first, disk-fallback strategy and attached
- * to the proto chunk. The chunk status is then reset to
- * {@link ChunkStatus#EMPTY} so the worldgen pipeline re-runs and applies the
- * delta on top of fresh terrain.
+ * <p>This runs at {@code RETURN}, after vanilla has converted serialized chunk
+ * NBT into a proto chunk. Chunkis then loads the matching delta using a
+ * memory-first, disk-fallback strategy and attaches it through
+ * {@link ChunkisDeltaDuck}.</p>
+ *
+ * <p>For synthetic empty chunks (no persisted base chunk NBT), the status is
+ * reset to {@link ChunkStatus#EMPTY} so vanilla worldgen can regenerate terrain
+ * and Chunkis can replay the delta on top of fresh terrain later.</p>
+ *
+ * <p>For chunks with a persisted vanilla-compatible base chunk NBT, that NBT
+ * represents stable generated terrain. Sparse block and block-entity edits are
+ * replayed immediately and the status is left intact.</p>
+ *
+ * @author Liparakis
+ * @version 1.2
+ *
  */
 @Mixin(SerializedChunk.class)
 public class ChunkSerializerMixin {
 
-    // -------------------------------------------------------------------------
-    // Injection
-    // -------------------------------------------------------------------------
 
     /**
-     * Intercepts the return of {@code SerializedChunk#convert} to restore
-     * any Chunkis delta attached to the chunk.
+     * Intercepts vanilla serialized chunk conversion and restores Chunkis state.
      *
-     * @param world       the server world context
-     * @param poiStorage  point of interest storage (unused by this mixin)
-     * @param key         storage key for the chunk (unused by this mixin)
-     * @param chunkPos        the chunk position being converted
-     * @param cir         callback holding the converted {@link ProtoChunk}
+     * <p>{@code poiStorage} and {@code key} are unused by Chunkis but are required
+     * by the injection signature to match the target method exactly.</p>
+     *
+     * @param world      server world context
+     * @param poiStorage point of interest storage (unused by Chunkis)
+     * @param key        storage key (unused by Chunkis)
+     * @param chunkPos   chunk position being converted
+     * @param cir        callback holding the converted proto chunk
      */
     @Inject(method = "convert", at = @At("RETURN"))
     private static void chunkis$onConvert(
@@ -55,144 +70,221 @@ public class ChunkSerializerMixin {
             final StorageKey key,
             final ChunkPos chunkPos,
             final CallbackInfoReturnable<ProtoChunk> cir) {
-
         final ProtoChunk chunk = cir.getReturnValue();
-        if (chunk == null) return;
-
-        restoreChunkDelta(world, chunkPos, chunk);
+        if (chunk == null) {
+            return;
+        }
+        chunkis$restoreChunkDelta(world, chunkPos, chunk);
     }
 
-    // -------------------------------------------------------------------------
-    // Restoration orchestration
-    // -------------------------------------------------------------------------
-
     /**
-     * Loads the delta for the given position and, if non-empty, attaches it to
-     * the chunk and resets its status for worldgen re-application.
+     * Loads, attaches, and applies the Chunkis delta for a converted proto chunk.
      *
-     * @param world the server world (for disk storage access)
+     * <p>If no meaningful delta exists the proto chunk is left exactly as vanilla
+     * produced it.</p>
+     *
+     * <p>Restore order:</p>
+     * <ol>
+     *   <li>Load delta (memory → disk).</li>
+     *   <li>Trace log.</li>
+     *   <li>Set suppression flag from persisted metadata.</li>
+     *   <li>If a base chunk is persisted, replay block and block-entity edits
+     *       immediately so player changes survive status-intact loads.</li>
+     *   <li>Attach delta to chunk via {@link ChunkisDeltaDuck}.</li>
+     *   <li>If no base chunk, reset status to {@link ChunkStatus#EMPTY} so vanilla
+     *       worldgen regenerates terrain before delta replay.</li>
+     * </ol>
+     *
+     * @param world the server world
      * @param pos   the chunk position
-     * @param chunk the newly converted proto chunk
+     * @param chunk the converted proto chunk
      */
     @Unique
-    private static void restoreChunkDelta(
+    private static void chunkis$restoreChunkDelta(
             final ServerWorld world,
             final ChunkPos pos,
             final ProtoChunk chunk) {
+        final ChunkDelta<BlockState, NbtCompound> delta = chunkis$loadDelta(world, pos);
 
-        final ChunkDelta<?, ?> delta = loadDelta(pos, world);
-        if (isDeltaAbsent(delta)) return;
-        delta.setSuppressInitialRepopulation(resolveSuppressInitialRepopulation(delta));
-        attachDeltaToChunk(chunk, delta);
-        resetChunkStatus(chunk);
-    }
 
-    // -------------------------------------------------------------------------
-    // Delta loading - memory-first, disk-fallback
-    // -------------------------------------------------------------------------
+        if (chunkis$isDeltaAbsent(delta)) {
+            return;
+        }
 
-    /**
-     * Loads the delta for the given chunk position using a two-tier strategy:
-     * memory-first from {@link GlobalChunkTracker}, then disk fallback from CIS
-     * storage for cold loads.
-     *
-     * @param pos   the chunk position
-     * @param world the server world (for disk storage access)
-     * @return the loaded delta, or null if none exists
-     */
-    @Unique
-    @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDelta(final ChunkPos pos, final ServerWorld world) {
-        final ChunkDelta fromMemory = loadDeltaFromMemory(pos, world);
-        if (fromMemory != null) return fromMemory;
-        return loadDeltaFromDisk(pos, world);
+        delta.setSuppressInitialRepopulation(CisNbtUtil.shouldSuppressInitialRepopulation(delta));
+
+        final boolean hasBase = CisNbtUtil.hasPersistedBaseChunkNbt(delta.getChunkMetadata());
+
+        if (hasBase) {
+            chunkis$replayBaseChunkBlockDelta(chunk, delta);
+            chunkis$replayBaseChunkBlockEntityDelta(chunk, delta);
+        }
+
+        chunkis$attachDeltaToChunk(chunk, delta);
+
+        if (!hasBase) {
+            chunk.setStatus(ChunkStatus.EMPTY);
+        }
     }
 
     /**
-     * Returns a non-empty delta from the in-memory tracker, or null.
+     * Loads a delta using a memory-first, disk-fallback strategy.
      *
+     * <p>The global tracker is checked first because it may hold a newer in-memory
+     * state than the on-disk copy. If the tracker has nothing (or only an empty
+     * delta), CIS storage is used for cold loads.</p>
+     *
+     * @param world the server world
      * @param pos   the chunk position
-     * @param world the server world used to scope tracker access
-     * @return the in-memory delta, or null if absent or empty
+     * @return the loaded delta, or {@code null} if none exists
      */
     @Unique
-    @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromMemory(final ChunkPos pos, final ServerWorld world) {
-        final ChunkDelta delta = GlobalChunkTracker.getDelta(world, pos);
-        return (delta != null && !delta.isEmpty()) ? delta : null;
+    private static ChunkDelta<BlockState, NbtCompound> chunkis$loadDelta(
+            final ServerWorld world,
+            final ChunkPos pos) {
+        final ChunkDelta<?, ?> memoryDelta = GlobalChunkTracker.getDelta(world, pos);
+        if (!chunkis$isDeltaAbsent(memoryDelta)) {
+            return chunkis$castBlockDelta(memoryDelta);
+        }
+        return chunkis$loadDeltaFromDisk(world, pos);
     }
 
     /**
      * Loads a delta from persistent CIS storage.
      *
+     * <p>{@link CisStorage#load(CisChunkPos)} returns an empty delta when no entry
+     * exists; callers should apply {@link #chunkis$isDeltaAbsent} afterward.</p>
+     *
+     * @param world the server world
      * @param pos   the chunk position
-     * @param world the server world providing the storage instance
-     * @return the loaded delta, or null if no entry exists on disk
+     * @return the loaded disk delta (may be empty)
      */
     @Unique
-    @SuppressWarnings("rawtypes")
-    private static ChunkDelta loadDeltaFromDisk(final ChunkPos pos, final ServerWorld world) {
-        return FabricCisStorageHelper.getStorage(world).load(new CisChunkPos(pos.x, pos.z));
+    private static ChunkDelta<BlockState, NbtCompound> chunkis$loadDeltaFromDisk(
+            final ServerWorld world,
+            final ChunkPos pos) {
+        return FabricCisStorageHelper.getStorage(world)
+                .load(new CisChunkPos(pos.x, pos.z));
     }
 
-    // -------------------------------------------------------------------------
-    // Chunk mutation helpers
-    // -------------------------------------------------------------------------
-
     /**
-     * Attaches the given delta to the chunk via {@link ChunkisDeltaDuck}.
-     * No-ops if the chunk does not implement the interface.
+     * Attaches {@code delta} to {@code chunk} through {@link ChunkisDeltaDuck}.
      *
-     * @param chunk the proto chunk to attach to
+     * <p>Stays defensive: if the interface is unexpectedly absent the vanilla
+     * conversion path is not broken.</p>
+     *
+     * @param chunk the proto chunk to mutate
      * @param delta the delta to attach
      */
     @Unique
-    @SuppressWarnings({ "rawtypes" })
-    private static void attachDeltaToChunk(final ProtoChunk chunk, final ChunkDelta delta) {
+    private static void chunkis$attachDeltaToChunk(
+            final ProtoChunk chunk,
+            final ChunkDelta<BlockState, NbtCompound> delta) {
         if (chunk instanceof ChunkisDeltaDuck deltaDuck) {
             deltaDuck.chunkis$setDelta(delta);
         }
     }
 
     /**
-     * Resets the chunk's generation status to {@link ChunkStatus#EMPTY} so the
-     * worldgen pipeline re-runs and applies the delta on top of fresh terrain.
+     * Replays sparse block edits directly into the chunk sections of a proto chunk
+     * loaded from a persisted base chunk.
      *
-     * @param chunk the proto chunk to reset
+     * <p>Full-status base chunks may not go through the same regeneration replay
+     * path as synthetic empty chunks, so block edits are applied here to prevent
+     * restored player changes from being skipped.</p>
+     *
+     * <p>Writes directly into {@link ChunkSection} instances for speed, bypassing
+     * higher-level chunk mutation code. Block-entity NBT and other delta payloads
+     * remain on the delta and are handled by the later restore path.</p>
+     *
+     * @param chunk the proto chunk to mutate
+     * @param delta the loaded block delta
      */
     @Unique
-    private static void resetChunkStatus(final ProtoChunk chunk) {
-        chunk.setStatus(ChunkStatus.EMPTY);
+    private static void chunkis$replayBaseChunkBlockDelta(
+            final ProtoChunk chunk,
+            final ChunkDelta<BlockState, NbtCompound> delta) {
+        final int bottomY = chunk.getBottomY();
+        final int topY = chunk.getTopYInclusive();
+        final ChunkSection[] sections = chunk.getSectionArray();
+
+        delta.forEachBlock((localX, localY, localZ, state) -> {
+            if (state == null || localY < bottomY || localY > topY) {
+                return;
+            }
+            final int sectionIndex = chunk.getSectionIndex(localY);
+            if (sectionIndex < 0 || sectionIndex >= sections.length) {
+                return;
+            }
+            final ChunkSection section = sections[sectionIndex];
+            if (section == null) {
+                return;
+            }
+            section.setBlockState(localX, localY & 15, localZ, state);
+        });
     }
 
     /**
-     * Recreates the old deserializer-based suppression decision using the
-     * information still available at the {@code convert(...)} hook.
+     * Installs sparse block-entity NBT from {@code delta} into {@code chunk}'s
+     * pending block-entity map.
      *
-     * @param delta the loaded chunk delta
-     * @return true if replay-time repopulation should be suppressed
+     * <p>Delta block entities are newer than the base chunk NBT and must win,
+     * particularly for inventories modified after the base chunk was captured.</p>
+     *
+     * @param chunk the proto chunk to mutate
+     * @param delta the loaded block/NBT delta
      */
     @Unique
-    private static boolean resolveSuppressInitialRepopulation(final ChunkDelta<?, ?> delta) {
-        final NbtCompound root = new NbtCompound();
-        final NbtCompound chunkisData = new NbtCompound();
-        chunkisData.putBoolean(CisNbtUtil.HAS_DELTA_KEY, true);
-        root.put(CisNbtUtil.CHUNKIS_DATA_KEY, chunkisData);
-        return CisNbtUtil.shouldSuppressInitialRepopulation(root, delta);
+    private static void chunkis$replayBaseChunkBlockEntityDelta(
+            final ProtoChunk chunk,
+            final ChunkDelta<BlockState, NbtCompound> delta) {
+        final ChunkPos chunkPos = chunk.getPos();
+        final var pendingBlockEntities =
+                ((ChunkBlockEntityNbtAccessor) chunk).chunkis$getBlockEntityNbts();
+
+        delta.getBlockEntities().long2ObjectEntrySet().forEach(entry -> {
+            final NbtCompound nbt = entry.getValue();
+            if (nbt == null) {
+                return;
+            }
+            final long packed = entry.getLongKey();
+            final BlockPos worldPos = chunkPos.getBlockPos(
+                    BlockInstruction.unpackX(packed),
+                    BlockInstruction.unpackY(packed),
+                    BlockInstruction.unpackZ(packed)
+            );
+            pendingBlockEntities.put(worldPos, nbt.copy());
+        });
     }
 
-    // -------------------------------------------------------------------------
-    // Guard predicates
-    // -------------------------------------------------------------------------
-
     /**
-     * Returns true if the given delta is null or contains no changes.
+     * Returns {@code true} when {@code delta} is absent or carries no payload.
      *
-     * @param delta the delta to test, may be null
-     * @return true if the delta should be skipped
+     * @param delta the delta to inspect; may be {@code null}
+     * @return {@code true} if the delta should be ignored
      */
     @Unique
-    private static boolean isDeltaAbsent(final ChunkDelta<?, ?> delta) {
+    private static boolean chunkis$isDeltaAbsent(final ChunkDelta<?, ?> delta) {
         return delta == null || delta.isEmpty();
     }
+
+    /**
+     * Casts a wildcard tracker delta to the concrete Minecraft block/NBT shape.
+     *
+     * <p>The global tracker stores deltas with wildcard generic types because it is
+     * shared infrastructure. This mixin works exclusively with
+     * {@code ChunkDelta<BlockState, NbtCompound>}, so the unchecked cast is
+     * isolated here rather than scattered across the load path.</p>
+     *
+     * @param delta a wildcard delta from the tracker; must be a block/NBT delta
+     * @return the same instance typed as {@code ChunkDelta<BlockState, NbtCompound>}
+     */
+    @Unique
+    @SuppressWarnings("unchecked")
+    private static ChunkDelta<BlockState, NbtCompound> chunkis$castBlockDelta(
+            final ChunkDelta<?, ?> delta) {
+        return (ChunkDelta<BlockState, NbtCompound>) delta;
+    }
+
+
 }

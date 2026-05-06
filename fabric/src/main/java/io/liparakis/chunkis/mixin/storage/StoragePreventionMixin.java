@@ -48,10 +48,6 @@ public class StoragePreventionMixin {
     @Unique
     private static final Logger LOGGER = Chunkis.LOGGER;
 
-    // -------------------------------------------------------------------------
-    // Write suppression
-    // -------------------------------------------------------------------------
-
     /**
      * Cancels vanilla chunk NBT writes to {@code .mca} region files.
      *
@@ -77,10 +73,6 @@ public class StoragePreventionMixin {
         ci.cancel();
     }
 
-    // -------------------------------------------------------------------------
-    // Read suppression
-    // -------------------------------------------------------------------------
-
     /**
      * Cancels vanilla chunk NBT reads and returns null.
      *
@@ -104,10 +96,6 @@ public class StoragePreventionMixin {
         logTrace("Blocking vanilla chunk read for {}", pos);
         cir.setReturnValue(null);
     }
-
-    // -------------------------------------------------------------------------
-    // Scan suppression
-    // -------------------------------------------------------------------------
 
     /**
      * Cancels chunk scan operations used for data migration and validation.
@@ -134,10 +122,6 @@ public class StoragePreventionMixin {
         ci.cancel();
     }
 
-    // -------------------------------------------------------------------------
-    // Sync suppression
-    // -------------------------------------------------------------------------
-
     /**
      * Cancels region file buffer sync operations.
      *
@@ -155,10 +139,6 @@ public class StoragePreventionMixin {
         logTrace("Blocking vanilla storage sync", null);
         ci.cancel();
     }
-
-    // -------------------------------------------------------------------------
-    // Logging helper
-    // -------------------------------------------------------------------------
 
     /**
      * Emits a TRACE-level log entry. No-ops when trace logging is disabled,

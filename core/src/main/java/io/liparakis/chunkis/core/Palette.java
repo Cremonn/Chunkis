@@ -6,43 +6,38 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A bidirectional mapping between objects of type T and compact integer IDs.
+ * Bidirectional mapping between objects of type T and compact integer IDs.
  * <p>
- * This class implements a palette data structure commonly used for data compression
- * in chunk storage systems. It maintains a one-to-one correspondence between unique
- * objects and sequential integer IDs, allowing repeated objects to be represented
- * by small integer references instead of storing the full object multiple times.
- * </p>
+ * Used as a palette for compressing repeated values (e.g. BlockStates in chunks),
+ * where many entries share the same value and can be represented by a small ID.
  * <p>
- * The palette is particularly useful for BlockStates in Minecraft chunks, where:
- * <ul>
- *   <li>Many blocks in a chunk share the same state (e.g., multiple stone blocks)</li>
- *   <li>Storing a single BlockState reference plus many integer IDs is more memory-efficient</li>
- *   <li>Integer IDs can be packed into compact bit arrays for further compression</li>
- * </ul>
- * </p>
+ * Instead of storing the full object multiple times, we store:
+ * - one unique instance in the palette
+ * - many integer references to it
  * <p>
- * Implementation details:
- * <ul>
- *   <li>IDs are assigned sequentially starting from 0</li>
- *   <li>Lookups by object are O(1) via HashMap</li>
- *   <li>Lookups by ID are O(1) via ArrayList</li>
- *   <li>IDs are stable - once assigned, they never change for a given object</li>
- *   <li>Not thread-safe - external synchronization required for concurrent access</li>
- * </ul>
- * </p>
+ * Typical use case:
+ * - Chunk sections where most blocks repeat (stone, air, etc.)
+ * - IDs can later be bit-packed for further compression
  * <p>
- * Memory characteristics:
- * <ul>
- *   <li>Initial capacity: 32 entries (tuned for typical chunk diversity)</li>
- *   <li>Grows dynamically as needed</li>
- *   <li>Memory overhead: ~2 references per unique entry (List + Map)</li>
- * </ul>
- * </p>
+ * Characteristics:
+ * - IDs are assigned sequentially starting from 0
+ * - O(1) lookup by object (HashMap)
+ * - O(1) lookup by ID (ArrayList)
+ * - IDs are stable once assigned
+ * - Not thread-safe
+ * <p>
+ * Memory:
+ * - Initial capacity: 32
+ * - Grows dynamically
+ * - ~2 references per unique entry (map + list)
  *
- * @param <T> the type of objects to be indexed in the palette
+ * @param <T> type stored in the palette
+ *
  * @see ChunkDelta
  * @see BlockInstruction
+ *
+ * @version 1
+ * @author Liparakis
  */
 public class Palette<T> {
     /** Initial capacity optimized for typical chunk block diversity */
@@ -121,5 +116,22 @@ public class Palette<T> {
      */
     public List<T> getAll() {
         return idToEntry;
+    }
+
+    /**
+     * Creates a shallow copy of this palette.
+     * <p>
+     * The new palette contains the same entries and ID mappings as this one,
+     * but its internal collections are independent. Subsequent modifications to
+     * the original palette will not affect the copy.
+     * </p>
+     *
+     * @return a new Palette instance with the same state
+     */
+    public Palette<T> copy() {
+        Palette<T> copy = new Palette<>();
+        copy.idToEntry.addAll(this.idToEntry);
+        copy.entryToId.putAll(this.entryToId);
+        return copy;
     }
 }

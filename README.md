@@ -40,7 +40,7 @@ Chunkis hooks into the chunk save and load pipeline via Fabric mixins. On save, 
 
 Each `.cis` file contains a block state palette, a bit-packed delta instruction stream (with jump instructions to skip unmodified sections), and NBT data for block entities and global entities.
 
-**On-disk layout:**
+**On-disk layout (overworld example):**
 ```
 world/
 └── chunkis/
@@ -50,6 +50,10 @@ world/
         ├── r.0.1.cis
         └── ...
 ```
+
+For non-overworld dimensions, Chunkis stores data under
+`world/dimensions/<namespace>/<path>/chunkis/`, including a dimension-local
+`global_ids.json` alongside that dimension's `regions/` directory.
 
 ---
 
