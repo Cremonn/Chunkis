@@ -2,46 +2,58 @@
 
 # Chunkis
 
-Chunkis replaces Minecraft's Anvil (`.mca`) chunk storage with a sparse delta format called CIS. Rather than writing entire chunks to disk, Chunkis records only the blocks that players actually changed relative to what the world generator originally produced.
+Chunkis replaces Minecraft's Anvil (`.mca`) chunk storage with a custom CIS format built around modified-chunk persistence, migration control, and safer save/load behavior.
 
-This is a disk I/O optimization. It has no effect on FPS, TPS, or gameplay.
+This is a disk I/O and persistence-layer optimization. It has no direct effect on FPS, TPS, or gameplay.
+
+`3.0.0` focuses on persistence safety, migration robustness, and overall runtime stability. It significantly reduces corruption-prone edge cases compared to older baseless-delta behavior. The tradeoff is that storage usage can increase in worlds where many modified chunks now persist safer restoration data.
 
 ## At a Glance
 
-|                     |                                                           |
-|:--------------------|:----------------------------------------------------------|
-| File size reduction | 90–95% typical for modpacks with player construction      |
-| Performance impact  | Negligible CPU cost during save/load; no rendering impact |
-| Compatibility       | Fabric only                                               |
-| Reversibility       | **Not reversible** — always back up before installing     |
-| Maturity            | Beta; tested on single-player and multiplayer servers     |
+|                     |                                                             |
+|:--------------------|:------------------------------------------------------------|
+| Primary goal        | Safer custom chunk persistence and migration                |
+| File size           | Often smaller than vanilla, but depends on world history    |
+| Performance impact  | Lower save/load overhead with stability-focused safeguards  |
+| Compatibility       | Fabric only                                                 |
+| Reversibility       | **Not reversible** - always back up before installing       |
+| Maturity            | Beta; tested on single-player and multiplayer servers       |
 
 ---
 
 ## Is This For You?
 
 **Good fit if:**
-- You run a modpack server where world backups or transfers are slow
-- Your modpack doesn't include mods that read `.mca` region files directly
-- You're able to test on a backup world before committing
+- You want Chunkis-specific persistence behavior instead of vanilla chunk storage
+- You care about migration control and safer chunk restore behavior
+- You run a modpack server where world storage still matters and you are willing to test
+- Your modpack does not include mods that read `.mca` region files directly
+- You are able to test on a backup world before committing
 
 **Not a good fit if:**
-- You're hoping for FPS or TPS improvements
+- You are looking only for FPS or TPS improvements
+- You need guaranteed smaller storage than vanilla in every world
 - Your modpack includes mods listed under Known Incompatibilities
-- You don't have a backup strategy in place
+- You do not have a backup strategy in place
 
 ---
 
 ## How It Works
 
-Vanilla Minecraft writes entire chunks to disk on every save — including thousands of unmodified blocks from world generation. For a typical modpack world, the vast majority of that data never changes.
+Vanilla Minecraft writes full chunk data to disk. Chunkis intercepts the save/load pipeline and persists chunk state through CIS, a custom format that can store modified chunks more compactly while preserving Chunkis-specific metadata and restore behavior.
 
-Chunkis hooks into the chunk save and load pipeline via Fabric mixins. On save, it computes a delta between the current chunk state and the generated baseline, then writes only the changed blocks. On load, it reconstructs the full chunk by applying those deltas back onto the generator output.
+Older versions leaned heavily on sparse delta replay. In `3.0.0`, the format is more safety-oriented: when needed, Chunkis persists enough restoration data to avoid terrain-regeneration and data-loss problems that could happen with baseless sparse deltas.
 
-Each `.cis` file contains a block state palette, a bit-packed delta instruction stream (with jump instructions to skip unmodified sections), and NBT data for block entities and global entities.
+Depending on the chunk, CIS data may include:
+- palette-compressed block delta data
+- block entity and entity NBT
+- structure and Chunkis-owned metadata
+- persisted restoration/base chunk data when required for safe reloads
+
+That means Chunkis is no longer purely a "write only changed blocks" system in every case. The exact storage win now depends on how many chunks need the safer restoration path.
 
 **On-disk layout (overworld example):**
-```
+```text
 world/
 └── chunkis/
     ├── global_ids.json
@@ -51,9 +63,21 @@ world/
         └── ...
 ```
 
-For non-overworld dimensions, Chunkis stores data under
-`world/dimensions/<namespace>/<path>/chunkis/`, including a dimension-local
-`global_ids.json` alongside that dimension's `regions/` directory.
+For non-overworld dimensions, Chunkis stores data under `world/dimensions/<namespace>/<path>/chunkis/`, including a dimension-local `global_ids.json` alongside that dimension's `regions/` directory.
+
+---
+
+## 3.0.0 Notes
+
+`3.0.0` is mainly a stability release.
+
+- Improves persistence safety and save/load correctness
+- Hardens migration behavior and avoids destructive upgrade paths
+- Improves async save handling and base-capture safety
+- Fixes several portal and restore edge cases
+- May increase storage usage in worlds where many modified chunks now store safer restoration data
+
+Storage efficiency work is still planned, but the exact compression or baseline redesign path is not final yet.
 
 ---
 
@@ -61,34 +85,37 @@ For non-overworld dimensions, Chunkis stores data under
 
 The following are incompatible with Chunkis:
 
-- **WorldEdit** — reads and writes `.mca` region files directly
+- **WorldEdit** - reads and writes `.mca` region files directly
 - Any mod that directly manipulates region files
 - Mods that apply chunk post-processing after world generation
 - Custom world managers with their own chunk serialization
 
-If you're unsure about a mod in your list, test on a backup world. Look for mods that mention "region files," "world editing," or "chunk serialization."
+If you are unsure about a mod in your list, test on a backup world. Look for mods that mention "region files", "world editing", or "chunk serialization".
 
 ---
 
 ## FAQ
 
-**Will this improve my FPS?**
-No. Chunkis only affects what gets written to disk. Rendering, ticking, and gameplay are entirely unaffected.
+**Will this improve my FPS?**  
+No. Chunkis only affects what gets written to disk. Rendering, ticking, and gameplay are unaffected.
 
-**Does this work on servers?**
-Yes. Chunkis is tested on both single-player and multiplayer. Delta encoding is per-chunk and scales linearly.
+**Does this work on servers?**  
+Yes. Chunkis is tested on both single-player and multiplayer.
 
-**Why hasn't my world converted to CIS yet?**
+**Why has my world not converted to CIS yet?**  
 Chunks convert when they save. Unvisited or unmodified chunks stay in Anvil format until a player loads and modifies them.
 
-**Can I move a CIS world to a different server?**
+**Is Chunkis always smaller than vanilla?**  
+No. In many worlds it is still smaller, sometimes substantially smaller, but `3.0.0` prioritizes restore safety over maximum sparsity. Worlds with many modified chunks may see higher CIS storage usage than older Chunkis releases.
+
+**Can I move a CIS world to a different server?**  
 Yes, as long as both servers have Chunkis installed. The `global_ids.json` file ensures portability. Without Chunkis, the world cannot be read.
 
-**What happens if Chunkis development stops?**
-Your world remains in CIS format. You'll need to keep Chunkis installed, or restore from a pre-Chunkis backup.
+**What happens if Chunkis development stops?**  
+Your world remains in CIS format. You will need to keep Chunkis installed, or restore from a pre-Chunkis backup.
 
-**Can I use this with [mod]?**
-Check Known Incompatibilities above. If the mod reads `.mca` files or modifies chunks post-generation, it's likely incompatible. When unsure, test on a backup.
+**Can I use this with a specific mod?**  
+Check Known Incompatibilities above. If the mod reads `.mca` files or modifies chunks post-generation, it is likely incompatible. When unsure, test on a backup.
 
 ---
 
@@ -96,8 +123,9 @@ Check Known Incompatibilities above. If the mod reads `.mca` files or modifies c
 
 Before opening an issue:
 - Test on a backup world, not your main save
-- Confirm the issue isn't caused by a mod in the Known Incompatibilities list
-- Make sure you're on the latest Chunkis version
+- Confirm the issue is not caused by a mod in the Known Incompatibilities list
+- Make sure you are on the latest Chunkis version
+- State whether the problem is about correctness, performance, or storage growth
 
 When opening an issue, include:
 - Minecraft version, Fabric Loader version, and full modlist
@@ -115,6 +143,7 @@ Contributions are welcome. The most valuable contributions are:
 - Bug fixes
 - Compatibility fixes or testing against popular modpacks
 - Performance improvements
+- Storage-format and compression improvements
 - Backports to older Minecraft versions
 - Documentation improvements
 
